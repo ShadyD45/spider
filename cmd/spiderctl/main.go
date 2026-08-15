@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 	"text/tabwriter"
 	"time"
 
@@ -33,7 +34,7 @@ var (
 )
 
 func init() {
-	rootCmd.PersistentFlags().StringVar(&cacheDirFlag, "cache-dir", "/var/lib/artifactd", "Path to local cache directory")
+	rootCmd.PersistentFlags().StringVar(&cacheDirFlag, "cache-dir", "/var/lib/spider", "Path to local cache directory")
 	rootCmd.PersistentFlags().StringVar(&trackerAddrFlag, "tracker", "127.0.0.1:50051", "Central tracker address")
 	rootCmd.PersistentFlags().StringVar(&daemonAddrFlag, "daemon", "127.0.0.1:50052", "Local spiderd daemon address")
 
@@ -45,6 +46,8 @@ func init() {
 	rootCmd.AddCommand(cacheCmd)
 	rootCmd.AddCommand(benchmarkCmd)
 	rootCmd.AddCommand(verifyCmd)
+	rootCmd.AddCommand(pinCmd)
+	rootCmd.AddCommand(unpinCmd)
 
 	verifyCmd.AddCommand(verifyArtifactCmd)
 	verifyCmd.AddCommand(verifyCacheCmd)
@@ -57,6 +60,7 @@ var (
 	pubVersion    string
 	pubChunkSize  int64
 	pubOutputFile string
+	pubNodeID     string
 )
 
 var publishCmd = &cobra.Command{
@@ -111,10 +115,27 @@ var publishCmd = &cobra.Command{
 				trClient := proto.NewTrackerServiceClient(conn)
 				trCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 				defer cancel()
-				_, _ = trClient.ReportChunks(trCtx, &proto.ReportChunksRequest{
-					NodeId:      "publisher",
-					ChunkHashes: manifest.AllChunkHashes(),
+				_, _ = trClient.PutArtifact(trCtx, &proto.PutArtifactRequest{
+					ArtifactId:   manifest.ArtifactID,
+					Name:         manifest.Name,
+					Version:      manifest.Version,
+					ManifestJson: manifestJSON,
 				})
+				reportNode := pubNodeID
+				if reportNode == "" {
+					reportNode = os.Getenv("NODE_ID")
+				}
+				if reportNode != "" {
+					_, _ = trClient.ReportChunks(trCtx, &proto.ReportChunksRequest{
+						NodeId:      reportNode,
+						ChunkHashes: manifest.AllChunkHashes(),
+					})
+					_, _ = trClient.ReportArtifact(trCtx, &proto.ReportArtifactRequest{
+						NodeId:     reportNode,
+						ArtifactId: manifest.ArtifactID,
+						Complete:   true,
+					})
+				}
 			}
 		}
 
@@ -165,6 +186,31 @@ var syncCmd = &cobra.Command{
 		}
 
 		fmt.Printf("Sync request submitted successfully. Job ID: %s (Status: %s)\n", resp.JobId, resp.Message)
+
+		deadline := time.Now().Add(10 * time.Minute)
+		for time.Now().Before(deadline) {
+			st, err := client.GetNodeStatus(context.Background(), &proto.GetNodeStatusRequest{JobId: resp.JobId})
+			if err != nil {
+				return nil
+			}
+			for _, j := range st.ActiveJobs {
+				if j.JobId != resp.JobId {
+					continue
+				}
+				if j.Status == "RUNNING" {
+					time.Sleep(300 * time.Millisecond)
+					continue
+				}
+				saved := j.PeerBytes
+				fmt.Printf("reused=%d peer_chunks=%d peer_bytes=%d origin_chunks=%d origin_bytes=%d origin_bytes_saved=%d status=%s\n",
+					j.SkippedChunks, j.PeerChunks, j.PeerBytes, j.OriginChunks, j.OriginBytes, saved, j.Status)
+				if j.Status == "FAILED" {
+					return fmt.Errorf("sync failed: %s", j.ErrorMessage)
+				}
+				return nil
+			}
+			time.Sleep(300 * time.Millisecond)
+		}
 		return nil
 	},
 }
@@ -309,29 +355,98 @@ var cacheCmd = &cobra.Command{
 	},
 }
 
+var pinManifest string
+
+var pinCmd = &cobra.Command{
+	Use:   "pin",
+	Short: "Pin an artifact so its chunks are exempt from LRU eviction",
+	RunE: func(cmd *cobra.Command, args []string) error {
+		if pinManifest == "" {
+			return fmt.Errorf("--manifest is required")
+		}
+		data, err := os.ReadFile(pinManifest)
+		if err != nil {
+			return err
+		}
+		m, err := v1.ParseManifest(data)
+		if err != nil {
+			return err
+		}
+		c, err := cache.NewCache(cacheDirFlag)
+		if err != nil {
+			return err
+		}
+		mgr, err := cache.NewManager(c, 0, 0, 0)
+		if err != nil {
+			return err
+		}
+		if err := mgr.Pin(m); err != nil {
+			return err
+		}
+		fmt.Printf("Pinned %s (%s@%s)\n", m.ArtifactID, m.Name, m.Version)
+		return nil
+	},
+}
+
+var unpinID string
+
+var unpinCmd = &cobra.Command{
+	Use:   "unpin",
+	Short: "Unpin an artifact id from the local cache",
+	RunE: func(cmd *cobra.Command, args []string) error {
+		if unpinID == "" {
+			return fmt.Errorf("--artifact-id is required")
+		}
+		c, err := cache.NewCache(cacheDirFlag)
+		if err != nil {
+			return err
+		}
+		mgr, err := cache.NewManager(c, 0, 0, 0)
+		if err != nil {
+			return err
+		}
+		if err := mgr.Unpin(unpinID); err != nil {
+			return err
+		}
+		fmt.Printf("Unpinned %s\n", unpinID)
+		return nil
+	},
+}
+
 // benchmarkCmd
 var (
 	benchSizeMB  int64
 	benchWorkers int
 	benchChunkMB int64
+	benchFile    string
 )
 
 var benchmarkCmd = &cobra.Command{
 	Use:   "benchmark",
 	Short: "Run automated comparative benchmark between Direct Origin and Spider P2P Mesh",
 	RunE: func(cmd *cobra.Command, args []string) error {
-		fmt.Println("========================================================================")
-		fmt.Printf("  Spider Artifact Mesh — Automated Distribution Benchmark\n")
-		fmt.Printf("  Model Size: %d MB | Workers: %d | Chunk Size: %d MB\n", benchSizeMB, benchWorkers, benchChunkMB)
-		fmt.Println("========================================================================")
-
-		suite := benchmark.NewSuite("")
-		ctx := context.Background()
-
 		artifactBytes := benchSizeMB * 1024 * 1024
 		chunkBytes := benchChunkMB * 1024 * 1024
+		managed := !cmd.Flags().Changed("file") || benchmark.IsDefaultPayload(benchFile)
+		originPath, err := benchmark.PrepareOrigin(benchFile, artifactBytes, managed)
+		if err != nil {
+			return err
+		}
+		originAbs, err := filepath.Abs(originPath)
+		if err != nil {
+			originAbs = originPath
+		}
 
-		originRes, meshRes, err := suite.RunComparison(ctx, artifactBytes, benchWorkers, chunkBytes)
+		fmt.Println("========================================================================")
+		fmt.Printf("  Spider Artifact Mesh — Automated Distribution Benchmark\n")
+		fmt.Printf("  File: %s\n", originAbs)
+		fmt.Printf("  Size: %d MB | Workers: %d | Chunk Size: %d MB\n", benchSizeMB, benchWorkers, benchChunkMB)
+		fmt.Println("========================================================================")
+
+		suite := benchmark.NewSuite(benchmark.DefaultWorkRel)
+		ctx := context.Background()
+
+		originRes, meshRes, err := suite.RunComparison(ctx, originPath, benchWorkers, chunkBytes)
 		if err != nil {
 			return fmt.Errorf("benchmark execution failed: %w", err)
 		}
@@ -463,6 +578,7 @@ func init() {
 	publishCmd.Flags().StringVarP(&pubVersion, "version", "v", "", "Artifact version (e.g. 1.0.0)")
 	publishCmd.Flags().Int64Var(&pubChunkSize, "chunk-size", v1.DefaultChunkSize, "Chunk size in bytes (default 4 MiB)")
 	publishCmd.Flags().StringVarP(&pubOutputFile, "output", "o", "", "Output manifest JSON file path")
+	publishCmd.Flags().StringVar(&pubNodeID, "node-id", "", "Node id for tracker chunk/seed registration (default NODE_ID env)")
 
 	syncCmd.Flags().StringVarP(&syncManifestFile, "manifest", "m", "", "Path to artifact manifest JSON file")
 	syncCmd.Flags().StringVarP(&syncDestDir, "dest", "d", "", "Destination directory path to materialize files")
@@ -470,9 +586,13 @@ func init() {
 
 	inspectCmd.Flags().StringVarP(&inspectManifestFile, "manifest", "m", "", "Path to artifact manifest JSON file")
 
+	pinCmd.Flags().StringVarP(&pinManifest, "manifest", "m", "", "Path to artifact manifest JSON file")
+	unpinCmd.Flags().StringVar(&unpinID, "artifact-id", "", "Artifact id to unpin")
+
 	benchmarkCmd.Flags().Int64Var(&benchSizeMB, "size", 50, "Total synthetic model size in Megabytes (MB)")
 	benchmarkCmd.Flags().IntVar(&benchWorkers, "workers", 4, "Number of concurrent simulated worker nodes")
 	benchmarkCmd.Flags().Int64Var(&benchChunkMB, "chunk-size", 4, "Chunk size in Megabytes (MB)")
+	benchmarkCmd.Flags().StringVar(&benchFile, "file", benchmark.DefaultPayloadPath(), "Transfer payload file or origin directory (default tmp/origin/payload.bin)")
 
 	verifyArtifactCmd.Flags().StringVarP(&verifyManifestPath, "manifest", "m", "", "Path to artifact manifest JSON file")
 	verifyArtifactCmd.Flags().StringVarP(&verifyTargetPath, "dest", "d", "", "Path to materialized directory")

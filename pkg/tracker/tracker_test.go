@@ -38,17 +38,18 @@ func TestTrackerRegistryAndRanking(t *testing.T) {
 		Host:    "host-3",
 	}
 
-	reg.RegisterPeer(node1)
-	reg.RegisterPeer(node2)
-	reg.RegisterPeer(requester)
+	ctx := context.Background()
+	reg.RegisterPeer(ctx, node1)
+	reg.RegisterPeer(ctx, node2)
+	reg.RegisterPeer(ctx, requester)
 
 	chunkHash := "sha256:1111111111111111111111111111111111111111111111111111111111111111"
 
 	// Both node1 and node2 have chunkHash
-	reg.ReportChunks("node-1", []string{chunkHash})
-	reg.ReportChunks("node-2", []string{chunkHash})
+	reg.ReportChunks(ctx, "node-1", []string{chunkHash})
+	reg.ReportChunks(ctx, "node-2", []string{chunkHash})
 
-	locs := reg.LocateChunks("req-node", []string{chunkHash})
+	locs := reg.LocateChunks(ctx, "req-node", []string{chunkHash})
 	if len(locs) != 1 {
 		t.Fatalf("Expected 1 location entry, got %d", len(locs))
 	}
@@ -65,13 +66,13 @@ func TestTrackerRegistryAndRanking(t *testing.T) {
 
 	// Test heartbeats and pruning
 	shortReg := NewRegistry(50 * time.Millisecond)
-	shortReg.RegisterPeer(node1)
+	shortReg.RegisterPeer(ctx, node1)
 	time.Sleep(100 * time.Millisecond)
-	pruned := shortReg.PruneDeadPeers()
+	pruned := shortReg.PruneDeadPeers(ctx)
 	if pruned != 1 {
 		t.Fatalf("Expected 1 pruned peer, got %d", pruned)
 	}
-	if len(shortReg.ListActivePeers()) != 0 {
+	if len(shortReg.ListActivePeers(ctx)) != 0 {
 		t.Fatal("Expected 0 active peers after pruning")
 	}
 }
@@ -105,7 +106,29 @@ func TestTrackerServerRPC(t *testing.T) {
 	}
 
 	peersResp, err := srv.ListPeers(ctx, &proto.ListPeersRequest{})
-	if err != nil || len(peersResp.Peers) != 1 {
+	if len(peersResp.Peers) != 1 {
 		t.Fatalf("ListPeers RPC failed: %v, resp: %+v", err, peersResp)
+	}
+
+	put, err := srv.PutArtifact(ctx, &proto.PutArtifactRequest{
+		ArtifactId:   "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		Name:         "m",
+		Version:      "1",
+		ManifestJson: []byte(`{}`),
+	})
+	if err != nil || !put.Success {
+		t.Fatalf("PutArtifact: %v %+v", err, put)
+	}
+	repA, err := srv.ReportArtifact(ctx, &proto.ReportArtifactRequest{
+		NodeId: "test-worker", ArtifactId: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", Complete: true,
+	})
+	if err != nil || !repA.Success {
+		t.Fatalf("ReportArtifact: %v %+v", err, repA)
+	}
+	locA, err := srv.LocateArtifact(ctx, &proto.LocateArtifactRequest{
+		RequesterNodeId: "other", ArtifactId: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+	})
+	if err != nil || len(locA.SeedPeers) != 1 {
+		t.Fatalf("LocateArtifact: %v %+v", err, locA)
 	}
 }

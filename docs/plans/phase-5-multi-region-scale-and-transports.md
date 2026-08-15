@@ -41,7 +41,7 @@ Phase 5 addresses multi-region Internet-scale deployment bottlenecks by introduc
 ```
 
 - **Global Registry**: Holds immutable manifest metadata (`ArtifactID`, manifest signature, origin S3 URIs).
-- **Regional Trackers**: Localized in each datacenter/cloud region. Track local peer chunk locations only. Prevent cross-region peer discovery for high-latency paths.
+- **Regional Trackers**: Localized in each datacenter/cloud region. Track local **artifact seeds** and sparse partials (Phase 2 compact advertisements). Prevent cross-region peer discovery for high-latency paths. Per-chunk SQL rows are not the scale path.
 - **Regional Bridge Seeds**: When an artifact is not present in region `EU`, designated regional seed nodes pull from origin or `US` bridge seeds and populate the regional mesh.
 
 ---

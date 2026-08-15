@@ -346,3 +346,35 @@ func TestEngineRejectsCorruptOriginBytes(t *testing.T) {
 	}
 }
 
+func TestEngineCancelsOnContext(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	originDir := t.TempDir()
+	data := []byte("0123456789abcdef0123456789abcdef")
+	if err := os.WriteFile(filepath.Join(originDir, "f.bin"), data, 0644); err != nil {
+		t.Fatal(err)
+	}
+	src, err := source.NewFilesystemSource(originDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c, err := cache.NewCache(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	pub := NewPublisher(c, 16)
+	manifest, err := pub.Publish(context.Background(), src, "", "cancel", "1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	empty, err := cache.NewCache(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	eng := NewEngine(Config{NodeID: "c", Cache: empty})
+	_, err = eng.Sync(ctx, "job-cancel", manifest, filepath.Join(t.TempDir(), "d"), src)
+	if err == nil {
+		t.Fatal("expected canceled sync")
+	}
+}
+

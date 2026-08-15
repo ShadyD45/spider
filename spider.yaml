@@ -1,0 +1,32 @@
+store:
+  driver: sqlite          # memory | sqlite | postgres | <registered>
+  dsn: /var/lib/spider/tracker.db
+  # Zero pool fields use driver defaults. Same pool keys apply to new SQL backends.
+  pool:
+    maxOpenConns: 8
+    maxIdleConns: 8
+    connMaxLifetime: 0s
+    connMaxIdleTime: 0s
+cache:
+  driver: memory          # none | memory | redis | <registered>
+  ttl: 10s
+  redis:
+    addr: 127.0.0.1:6379
+    prefix: "spider:"
+    pool:
+      maxOpenConns: 16    # redis PoolSize; 0 = 10*GOMAXPROCS (min 8)
+      maxIdleConns: 8
+      minIdleConns: 2
+      dialTimeout: 3s
+      readTimeout: 2s
+      writeTimeout: 2s
+      poolTimeout: 4s
+      connMaxIdleTime: 5m
+httpAddr: ":9090"
+logFormat: json
+diskCache:
+  dir: /var/lib/spider
+  maxBytes: 536870912000
+  lowWatermark: 0.80
+  highWatermark: 0.90
+  pinnedArtifacts: []

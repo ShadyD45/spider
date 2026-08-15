@@ -1,0 +1,115 @@
+{
+  "annotations": { "list": [] },
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [],
+  "liveNow": true,
+  "panels": [
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "decbytes" }, "overrides": [] },
+      "gridPos": { "h": 5, "w": 6, "x": 0, "y": 0 },
+      "id": 1,
+      "options": { "colorMode": "background", "graphMode": "area", "reduceOptions": { "calcs": ["lastNotNull"] } },
+      "targets": [{ "expr": "spider_origin_bytes_saved_total", "legendFormat": "saved", "refId": "A" }],
+      "title": "Origin bytes saved",
+      "type": "stat"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "percentunit", "min": 0, "max": 1 }, "overrides": [] },
+      "gridPos": { "h": 5, "w": 6, "x": 6, "y": 0 },
+      "id": 2,
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "showThresholdLabels": false },
+      "targets": [{ "expr": "spider_store_cache_hits_total / (spider_store_cache_hits_total + spider_store_cache_misses_total)", "legendFormat": "hit ratio", "refId": "A" }],
+      "title": "Metadata cache hit ratio",
+      "type": "gauge"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
+      "gridPos": { "h": 5, "w": 6, "x": 12, "y": 0 },
+      "id": 3,
+      "options": { "colorMode": "value", "reduceOptions": { "calcs": ["lastNotNull"] } },
+      "targets": [{ "expr": "spider_active_peers_count", "legendFormat": "peers", "refId": "A" }],
+      "title": "Active mesh peers",
+      "type": "stat"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "decbytes" }, "overrides": [] },
+      "gridPos": { "h": 5, "w": 6, "x": 18, "y": 0 },
+      "id": 4,
+      "options": { "colorMode": "value", "reduceOptions": { "calcs": ["lastNotNull"] } },
+      "targets": [{ "expr": "sum(spider_cache_used_bytes)", "legendFormat": "disk", "refId": "A" }],
+      "title": "Chunk cache on disk",
+      "type": "stat"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "Bps", "custom": { "fillOpacity": 20, "stacking": { "mode": "normal" } } }, "overrides": [] },
+      "gridPos": { "h": 9, "w": 16, "x": 0, "y": 5 },
+      "id": 5,
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" } },
+      "targets": [
+        { "expr": "rate(spider_peer_bytes_transferred_total[1m])", "legendFormat": "peer", "refId": "A" },
+        { "expr": "rate(spider_origin_bytes_downloaded_total[1m])", "legendFormat": "origin", "refId": "B" },
+        { "expr": "rate(spider_origin_bytes_saved_total[1m])", "legendFormat": "saved vs origin", "refId": "C" }
+      ],
+      "title": "Transfer mix (bytes/sec)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] },
+      "gridPos": { "h": 9, "w": 8, "x": 16, "y": 5 },
+      "id": 6,
+      "options": { "legend": { "displayMode": "list" } },
+      "targets": [
+        { "expr": "histogram_quantile(0.50, rate(spider_sync_duration_seconds_bucket[5m]))", "legendFormat": "p50", "refId": "A" },
+        { "expr": "histogram_quantile(0.95, rate(spider_sync_duration_seconds_bucket[5m]))", "legendFormat": "p95", "refId": "B" },
+        { "expr": "histogram_quantile(0.99, rate(spider_sync_duration_seconds_bucket[5m]))", "legendFormat": "p99", "refId": "C" }
+      ],
+      "title": "Sync latency percentiles",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "ops" }, "overrides": [] },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 14 },
+      "id": 7,
+      "options": { "legend": { "displayMode": "list" } },
+      "targets": [
+        { "expr": "rate(spider_store_cache_hits_total[1m])", "legendFormat": "hits", "refId": "A" },
+        { "expr": "rate(spider_store_cache_misses_total[1m])", "legendFormat": "misses", "refId": "B" }
+      ],
+      "title": "Tracker metadata cache (Redis/memory)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "ops" }, "overrides": [] },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 14 },
+      "id": 8,
+      "options": { "legend": { "displayMode": "list" } },
+      "targets": [
+        { "expr": "rate(spider_cache_hits_total[1m])", "legendFormat": "disk chunk hits", "refId": "A" },
+        { "expr": "rate(spider_chunk_verify_failures_total[1m])", "legendFormat": "SHA-256 failures", "refId": "B" }
+      ],
+      "title": "Integrity and local chunk hits",
+      "type": "timeseries"
+    }
+  ],
+  "refresh": "5s",
+  "schemaVersion": 39,
+  "tags": ["spider", "p2p", "artifacts"],
+  "templating": { "list": [] },
+  "time": { "from": "now-15m", "to": "now" },
+  "timepicker": {},
+  "timezone": "browser",
+  "title": "Spider mesh",
+  "uid": "spider",
+  "weekStart": ""
+}

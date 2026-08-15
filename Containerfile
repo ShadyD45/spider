@@ -1,31 +1,18 @@
-# Multi-stage Containerfile for Spider Artifact Mesh
-FROM golang:1.22-alpine AS builder
+# Runtime-only image. Binaries are built on the host via scripts/build-image.{sh,ps1}.
+FROM docker.io/library/alpine:3.24.1
 
-WORKDIR /build
-
-RUN apk add --no-cache git
-
-COPY go.mod go.sum ./
-RUN go mod download
-
-COPY . .
-
-RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o /build/bin/tracker ./cmd/tracker
-RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o /build/bin/spiderd ./cmd/spiderd
-RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o /build/bin/spiderctl ./cmd/spiderctl
-RUN cp /build/bin/spiderd /build/bin/artifactd && cp /build/bin/spiderctl /build/bin/artifactctl
-
-FROM alpine:latest
-
-RUN apk add --no-cache ca-certificates bash curl tzdata
+RUN apk add --no-cache ca-certificates tzdata \
+    && mkdir -p /var/lib/spider /var/lib/artifactd /data/models /data/output
 
 WORKDIR /app
 
-COPY --from=builder /build/bin/* /usr/local/bin/
-COPY --from=builder /build/bin/* /app/
+COPY dist/linux/tracker \
+     dist/linux/spiderd \
+     dist/linux/artifactd \
+     dist/linux/spiderctl \
+     dist/linux/artifactctl \
+     /usr/local/bin/
 
-RUN mkdir -p /var/lib/artifactd /data/models /data/output
-
-VOLUME ["/var/lib/artifactd", "/data"]
+VOLUME ["/var/lib/spider", "/var/lib/artifactd", "/data"]
 
 CMD ["/usr/local/bin/spiderd"]

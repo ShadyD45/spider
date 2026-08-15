@@ -30,16 +30,15 @@ func NewClientPool() *ClientPool {
 
 // GetClient retrieves or dials a gRPC connection to peerAddress.
 func (p *ClientPool) GetClient(ctx context.Context, peerAddress string) (proto.PeerServiceClient, error) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-
+	p.mu.RLock()
 	if conn, ok := p.conns[peerAddress]; ok {
+		p.mu.RUnlock()
 		return proto.NewPeerServiceClient(conn), nil
 	}
+	p.mu.RUnlock()
 
 	dialCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
 	defer cancel()
-
 	conn, err := grpc.DialContext(dialCtx, peerAddress,
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
 		grpc.WithBlock(),
@@ -48,7 +47,14 @@ func (p *ClientPool) GetClient(ctx context.Context, peerAddress string) (proto.P
 		return nil, fmt.Errorf("failed to dial peer %s: %w", peerAddress, err)
 	}
 
+	p.mu.Lock()
+	if existing, ok := p.conns[peerAddress]; ok {
+		p.mu.Unlock()
+		_ = conn.Close()
+		return proto.NewPeerServiceClient(existing), nil
+	}
 	p.conns[peerAddress] = conn
+	p.mu.Unlock()
 	return proto.NewPeerServiceClient(conn), nil
 }
 

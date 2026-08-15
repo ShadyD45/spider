@@ -22,8 +22,9 @@ cleanup() {
 }
 trap cleanup EXIT
 
-echo "--- 1. Starting Podman Cluster ---"
-${COMPOSE_CMD} up -d --build
+echo "--- 1. Building image and starting cluster ---"
+"$(dirname "$0")/build-image.sh"
+${COMPOSE_CMD} up -d
 
 echo "Waiting for services to become healthy..."
 sleep 5

@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	v1 "spider/api/v1"
@@ -136,5 +137,19 @@ func TestMaterializeRejectsCorruptCache(t *testing.T) {
 	}
 	if _, statErr := os.Stat(filepath.Join(outDir, "weights.bin")); !os.IsNotExist(statErr) {
 		t.Fatal("partial corrupt file should be removed after integrity failure")
+	}
+}
+
+func TestSafeJoinRejectsEscape(t *testing.T) {
+	base := t.TempDir()
+	if _, err := SafeJoin(base, "../etc/passwd"); err == nil {
+		t.Fatal("expected escape rejection")
+	}
+	got, err := SafeJoin(base, "ok/file.bin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasSuffix(filepath.ToSlash(got), "ok/file.bin") && !strings.Contains(got, "ok") {
+		t.Fatalf("unexpected join %s", got)
 	}
 }

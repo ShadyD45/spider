@@ -33,7 +33,7 @@ type Cache struct {
 // NewCache initializes cache directories at rootDir.
 func NewCache(rootDir string) (*Cache, error) {
 	if rootDir == "" {
-		rootDir = "/var/lib/artifactd"
+		rootDir = "/var/lib/spider"
 	}
 
 	c := &Cache{
@@ -76,9 +76,6 @@ func (c *Cache) chunkPath(hash string) (string, error) {
 
 // HasChunk checks if a verified chunk exists in cache.
 func (c *Cache) HasChunk(hash string) bool {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-
 	p, err := c.chunkPath(hash)
 	if err != nil {
 		return false
@@ -87,11 +84,11 @@ func (c *Cache) HasChunk(hash string) bool {
 	return err == nil && !info.IsDir()
 }
 
+// RootDir returns the cache root.
+func (c *Cache) RootDir() string { return c.rootDir }
+
 // GetChunkPath returns the absolute path to a chunk file if it exists.
 func (c *Cache) GetChunkPath(hash string) (string, error) {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-
 	p, err := c.chunkPath(hash)
 	if err != nil {
 		return "", err
@@ -107,9 +104,6 @@ func (c *Cache) GetChunkPath(hash string) (string, error) {
 
 // GetChunkReader opens a chunk file for reading and returns its size.
 func (c *Cache) GetChunkReader(hash string) (io.ReadCloser, int64, error) {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-
 	p, err := c.chunkPath(hash)
 	if err != nil {
 		return nil, 0, err

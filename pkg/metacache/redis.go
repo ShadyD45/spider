@@ -1,0 +1,156 @@
+package metacache
+
+import (
+	"context"
+	"fmt"
+	"runtime"
+	"time"
+
+	"github.com/redis/go-redis/v9"
+)
+
+func init() {
+	Register("redis", func(opts Options) (Cache, error) {
+		return NewRedis(opts)
+	})
+}
+
+// Redis is a shared metadata cache for multi-tracker deployments.
+type Redis struct {
+	client *redis.Client
+	prefix string
+	ttl    time.Duration
+}
+
+// NewRedis connects to Redis with a bounded connection pool.
+func NewRedis(opts Options) (*Redis, error) {
+	addr := opts.Addr
+	if addr == "" {
+		addr = "127.0.0.1:6379"
+	}
+	p := opts.Pool
+	poolSize := p.MaxOpenConns
+	if poolSize <= 0 {
+		poolSize = 10 * runtime.GOMAXPROCS(0)
+		if poolSize < 8 {
+			poolSize = 8
+		}
+	}
+	minIdle := p.MinIdleConns
+	if minIdle <= 0 {
+		minIdle = 2
+	}
+	maxIdle := p.MaxIdleConns
+	if maxIdle <= 0 {
+		maxIdle = poolSize / 2
+		if maxIdle < minIdle {
+			maxIdle = minIdle
+		}
+	}
+	dial := p.DialTimeout
+	if dial <= 0 {
+		dial = 3 * time.Second
+	}
+	read := p.ReadTimeout
+	if read <= 0 {
+		read = 2 * time.Second
+	}
+	write := p.WriteTimeout
+	if write <= 0 {
+		write = 2 * time.Second
+	}
+	poolTimeout := p.PoolTimeout
+	if poolTimeout <= 0 {
+		poolTimeout = 4 * time.Second
+	}
+	idleTime := p.ConnMaxIdleTime
+	if idleTime <= 0 {
+		idleTime = 5 * time.Minute
+	}
+	c := redis.NewClient(&redis.Options{
+		Addr:            addr,
+		Password:        opts.Password,
+		DB:              opts.DB,
+		PoolSize:        poolSize,
+		MinIdleConns:    minIdle,
+		MaxIdleConns:    maxIdle,
+		DialTimeout:     dial,
+		ReadTimeout:     read,
+		WriteTimeout:    write,
+		PoolTimeout:     poolTimeout,
+		ConnMaxLifetime: p.ConnMaxLifetime,
+		ConnMaxIdleTime: idleTime,
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), dial)
+	defer cancel()
+	if err := c.Ping(ctx).Err(); err != nil {
+		_ = c.Close()
+		return nil, fmt.Errorf("redis ping %s: %w", addr, err)
+	}
+	prefix := opts.Prefix
+	if prefix == "" {
+		prefix = "spider:"
+	}
+	ttl := opts.TTL
+	if ttl <= 0 {
+		ttl = 10 * time.Second
+	}
+	return &Redis{client: c, prefix: prefix, ttl: ttl}, nil
+}
+
+func (r *Redis) k(key string) string { return r.prefix + key }
+
+func (r *Redis) Get(ctx context.Context, key string) ([]byte, bool, error) {
+	b, err := r.client.Get(ctx, r.k(key)).Bytes()
+	if err == redis.Nil {
+		return nil, false, nil
+	}
+	if err != nil {
+		return nil, false, fmt.Errorf("redis get: %w", err)
+	}
+	return b, true, nil
+}
+
+func (r *Redis) Set(ctx context.Context, key string, value []byte, ttl time.Duration) error {
+	if ttl <= 0 {
+		ttl = r.ttl
+	}
+	if err := r.client.Set(ctx, r.k(key), value, ttl).Err(); err != nil {
+		return fmt.Errorf("redis set: %w", err)
+	}
+	return nil
+}
+
+func (r *Redis) Delete(ctx context.Context, key string) error {
+	if err := r.client.Del(ctx, r.k(key)).Err(); err != nil {
+		return fmt.Errorf("redis del: %w", err)
+	}
+	return nil
+}
+
+func (r *Redis) DeletePrefix(ctx context.Context, prefix string) error {
+	var cursor uint64
+	match := r.k(prefix) + "*"
+	for {
+		keys, next, err := r.client.Scan(ctx, cursor, match, 256).Result()
+		if err != nil {
+			return fmt.Errorf("redis scan: %w", err)
+		}
+		if len(keys) > 0 {
+			pipe := r.client.Pipeline()
+			for _, k := range keys {
+				pipe.Unlink(ctx, k)
+			}
+			if _, err := pipe.Exec(ctx); err != nil {
+				return fmt.Errorf("redis unlink: %w", err)
+			}
+		}
+		cursor = next
+		if cursor == 0 {
+			break
+		}
+	}
+	return nil
+}
+
+func (r *Redis) Close() error { return r.client.Close() }

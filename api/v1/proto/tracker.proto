@@ -7,9 +7,13 @@ option go_package = "spider/api/v1/proto;proto";
 service TrackerService {
   rpc RegisterPeer(RegisterPeerRequest) returns (RegisterPeerResponse);
   rpc Heartbeat(HeartbeatRequest) returns (HeartbeatResponse);
+  rpc DeregisterPeer(DeregisterPeerRequest) returns (DeregisterPeerResponse);
   rpc ReportChunks(ReportChunksRequest) returns (ReportChunksResponse);
   rpc LocateChunks(LocateChunksRequest) returns (LocateChunksResponse);
   rpc ListPeers(ListPeersRequest) returns (ListPeersResponse);
+  rpc PutArtifact(PutArtifactRequest) returns (PutArtifactResponse);
+  rpc ReportArtifact(ReportArtifactRequest) returns (ReportArtifactResponse);
+  rpc LocateArtifact(LocateArtifactRequest) returns (LocateArtifactResponse);
   rpc GetArtifactStatus(GetArtifactStatusRequest) returns (GetArtifactStatusResponse);
 }
 
@@ -40,6 +44,14 @@ message HeartbeatResponse {
   bool acknowledged = 1;
 }
 
+message DeregisterPeerRequest {
+  string node_id = 1;
+}
+
+message DeregisterPeerResponse {
+  bool success = 1;
+}
+
 message ReportChunksRequest {
   string node_id = 1;
   repeated string chunk_hashes = 2;
@@ -67,6 +79,37 @@ message ListPeersRequest {}
 
 message ListPeersResponse {
   repeated PeerInfo peers = 1;
+}
+
+message PutArtifactRequest {
+  string artifact_id = 1;
+  string name = 2;
+  string version = 3;
+  bytes manifest_json = 4;
+}
+
+message PutArtifactResponse {
+  bool success = 1;
+}
+
+message ReportArtifactRequest {
+  string node_id = 1;
+  string artifact_id = 2;
+  bool complete = 3;
+}
+
+message ReportArtifactResponse {
+  bool success = 1;
+}
+
+message LocateArtifactRequest {
+  string requester_node_id = 1;
+  string artifact_id = 2;
+}
+
+message LocateArtifactResponse {
+  string artifact_id = 1;
+  repeated PeerInfo seed_peers = 2;
 }
 
 message GetArtifactStatusRequest {

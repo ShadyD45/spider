@@ -1,0 +1,4 @@
+# Minimal build context: only the Containerfile and pre-built Linux binaries.
+*
+!Containerfile
+!dist/linux/**

@@ -47,6 +47,9 @@ message SyncJobStatus {
   int64 peer_chunks = 6;
   int64 origin_chunks = 7;
   string error_message = 8;
+  int64 skipped_chunks = 9;
+  int64 peer_bytes = 10;
+  int64 origin_bytes = 11;
 }
 
 message GetNodeStatusResponse {

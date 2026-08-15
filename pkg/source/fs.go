@@ -14,6 +14,7 @@ import (
 // FilesystemSource implements Source for a local directory.
 type FilesystemSource struct {
 	baseDir string
+	only    string // optional basename; when set, ListFiles returns just that file
 }
 
 // NewFilesystemSource creates a new FilesystemSource root.
@@ -30,6 +31,22 @@ func NewFilesystemSource(baseDir string) (*FilesystemSource, error) {
 		return nil, fmt.Errorf("path %s is not a directory", abs)
 	}
 	return &FilesystemSource{baseDir: abs}, nil
+}
+
+// NewPathSource accepts a directory (all files) or a single file.
+func NewPathSource(path string) (*FilesystemSource, error) {
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return nil, fmt.Errorf("invalid path %s: %w", path, err)
+	}
+	info, err := os.Stat(abs)
+	if err != nil {
+		return nil, fmt.Errorf("path not accessible %s: %w", abs, err)
+	}
+	if info.IsDir() {
+		return &FilesystemSource{baseDir: abs}, nil
+	}
+	return &FilesystemSource{baseDir: filepath.Dir(abs), only: filepath.Base(abs)}, nil
 }
 
 func (fs *FilesystemSource) resolve(relPath string) (string, error) {
@@ -69,6 +86,9 @@ func (fs *FilesystemSource) ListFiles(ctx context.Context, prefix string) ([]Fil
 			rel, err := filepath.Rel(fs.baseDir, path)
 			if err != nil {
 				return err
+			}
+			if fs.only != "" && rel != fs.only {
+				return nil
 			}
 			normPath := v1.NormalizePath(rel)
 			modeStr := fmt.Sprintf("%04o", info.Mode().Perm())

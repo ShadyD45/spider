@@ -68,7 +68,10 @@ func (m *Materializer) Materialize(ctx context.Context, manifest *v1.ArtifactMan
 		default:
 		}
 
-		targetFilePath := filepath.Join(destDir, filepath.FromSlash(fileEntry.Path))
+		targetFilePath, err := SafeJoin(destDir, fileEntry.Path)
+		if err != nil {
+			return err
+		}
 
 		// Ensure parent directory exists
 		if err := os.MkdirAll(filepath.Dir(targetFilePath), 0755); err != nil {

@@ -15,7 +15,7 @@ Phase 3 introduces enterprise-grade security hardening across all communication 
 2. **Node Identity & Certificate Management**: Implement node identity attestation (SPIFFE/SPIRE or internal CA certificate provisioning).
 3. **Cryptographically Signed Manifests**: Enforce manifest signing using Ed25519 keypairs to prevent artifact tampering or malicious manifest injection.
 4. **Access Control & RBAC**: Token-based authorization for publishing, fetching, and advertising artifacts.
-5. **Directory Traversal & Symlink Protection**: Strict path sanitization preventing malicious path escape or arbitrary file overwrite during materialization.
+5. **Directory Traversal & Symlink Protection**: Phase 2 ships a path-join escape guard in `pkg/materializer`. Phase 3 adds symlink policy (`allowSymlinks: false` by default) and hardens the guard under mTLS/signed-manifest threat models.
 
 ---
 
@@ -104,6 +104,6 @@ To prevent malicious manifests from overwriting host files (e.g. `../../../../et
 - [ ] Add CLI flags to `artifactd`, `tracker`, and `artifactctl` for `--tls-ca`, `--tls-cert`, and `--tls-key`.
 - [ ] Implement Ed25519 manifest signature generation in `cmd/artifactctl publish`.
 - [ ] Implement signature validation module in `pkg/manifest`.
-- [ ] Implement strict path boundary validator in `pkg/materializer`.
+- [x] Path-join escape guard in `pkg/materializer` (Phase 2). Symlink policy remains Phase 3.
 - [ ] Add security unit tests verifying rejection of path-traversal manifests and untrusted TLS clients.
 - [ ] Update `podman-compose.yml` to generate local TLS certificates (using `cfssl` or `openssl`) and enforce mTLS across containers.

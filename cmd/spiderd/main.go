@@ -4,7 +4,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
-	"log"
+	"log/slog"
 	"os"
 	"os/signal"
 	"syscall"
@@ -16,18 +16,25 @@ import (
 	v1 "spider/api/v1"
 	"spider/api/v1/proto"
 	"spider/pkg/cache"
+	"spider/pkg/config"
 	"spider/pkg/engine"
+	"spider/pkg/httpserver"
+	"spider/pkg/logging"
 	"spider/pkg/materializer"
+	"spider/pkg/metrics"
 	"spider/pkg/peer"
+	"spider/pkg/scheduler"
 	"spider/pkg/source"
 	"spider/pkg/topology"
 )
 
 type daemonSyncHandler struct {
-	nodeID   string
-	eng      *engine.Engine
-	cache    *cache.Cache
-	s3Config source.S3Config
+	nodeID string
+	eng    *engine.Engine
+	cache  *cache.Cache
+	mgr    *cache.Manager
+	s3     source.S3Config
+	runCtx context.Context
 }
 
 func (h *daemonSyncHandler) HandleSync(ctx context.Context, manifestJSON, destPath, originType, originURI string) (string, error) {
@@ -35,42 +42,41 @@ func (h *daemonSyncHandler) HandleSync(ctx context.Context, manifestJSON, destPa
 	if err != nil {
 		return "", fmt.Errorf("invalid manifest JSON: %w", err)
 	}
-
 	jobID := fmt.Sprintf("job-%d", time.Now().UnixNano())
 
 	var origin source.Source
 	if originURI != "" {
-		src, _, err := source.ParseSourceURI(ctx, originURI, h.s3Config.Endpoint, h.s3Config.Region, h.s3Config.AccessKey, h.s3Config.SecretKey)
+		src, _, err := source.ParseSourceURI(ctx, originURI, h.s3.Endpoint, h.s3.Region, h.s3.AccessKey, h.s3.SecretKey)
 		if err != nil {
-			log.Printf("[Daemon] Warning parsing origin URI %s: %v", originURI, err)
+			slog.Warn("origin uri", "uri", originURI, "err", err)
 		} else {
 			origin = src
 		}
-	} else if h.s3Config.Bucket != "" || h.s3Config.Endpoint != "" {
-		s3Src, err := source.NewS3Source(h.s3Config)
-		if err == nil {
+	} else if h.s3.Bucket != "" {
+		if s3Src, err := source.NewS3Source(h.s3); err == nil {
 			origin = s3Src
 		}
 	}
 
 	go func() {
-		bgCtx := context.Background()
-		metrics, err := h.eng.Sync(bgCtx, jobID, manifest, destPath, origin)
+		metricsOut, err := h.eng.Sync(h.runCtx, jobID, manifest, destPath, origin)
 		if err != nil {
-			log.Printf("[Daemon] Sync job %s failed: %v", jobID, err)
-		} else {
-			log.Printf("[Daemon] Sync job %s succeeded: %d peer chunks, %d origin chunks in %v",
-				jobID, metrics.PeerChunks, metrics.OriginChunks, metrics.Duration)
+			slog.Error("sync failed", "job", jobID, "err", err)
+			return
+		}
+		slog.Info("sync ok", "job", jobID, "summary", metricsOut.FormatSummary())
+		if h.mgr != nil {
+			_ = h.mgr.Pin(manifest)
+			_, _ = h.mgr.MaybeEvict()
+			metrics.CacheUsedBytes.Set(float64(h.mgr.UsedBytes()))
 		}
 	}()
-
 	return jobID, nil
 }
 
 func (h *daemonSyncHandler) GetStatus(jobID string) *proto.GetNodeStatusResponse {
 	chunks, _ := h.cache.ListChunks()
 	totalBytes, _ := h.cache.TotalCachedBytes()
-
 	var activeJobs []*proto.SyncJobStatus
 	for _, j := range h.eng.AllJobs() {
 		if jobID == "" || j.JobID == jobID {
@@ -83,10 +89,12 @@ func (h *daemonSyncHandler) GetStatus(jobID string) *proto.GetNodeStatusResponse
 				PeerChunks:       j.PeerChunks,
 				OriginChunks:     j.OriginChunks,
 				ErrorMessage:     j.ErrorMessage,
+				SkippedChunks:    j.SkippedChunks,
+				PeerBytes:        j.PeerBytes,
+				OriginBytes:      j.OriginBytes,
 			})
 		}
 	}
-
 	return &proto.GetNodeStatusResponse{
 		NodeId:           h.nodeID,
 		CachedChunks:     int64(len(chunks)),
@@ -108,44 +116,72 @@ func main() {
 		hostname = fmt.Sprintf("node-%d", time.Now().Unix())
 	}
 
-	nodeID := flag.String("node-id", getEnvOrDefault("NODE_ID", hostname), "Unique identifier for this node")
-	port := flag.Int("port", 50052, "Port for peer chunk streaming gRPC service")
-	advertiseAddr := flag.String("advertise-addr", getEnvOrDefault("ADVERTISE_ADDR", ""), "Address:port advertised to mesh peers")
-	trackerAddr := flag.String("tracker", getEnvOrDefault("TRACKER_ADDR", "127.0.0.1:50051"), "Tracker gRPC address")
-	cacheDir := flag.String("cache-dir", getEnvOrDefault("CACHE_DIR", "/var/lib/artifactd"), "Local disk cache directory")
-	region := flag.String("region", getEnvOrDefault("REGION", "us-east-1"), "Topology region")
-	zone := flag.String("zone", getEnvOrDefault("ZONE", "zone-a"), "Topology zone")
-	rack := flag.String("rack", getEnvOrDefault("RACK", "rack-1"), "Topology rack")
-	host := flag.String("host", getEnvOrDefault("HOST", hostname), "Topology host")
-
-	s3Endpoint := flag.String("s3-endpoint", getEnvOrDefault("MINIO_ENDPOINT", getEnvOrDefault("S3_ENDPOINT", "")), "S3 / MinIO endpoint URL")
-	s3Bucket := flag.String("s3-bucket", getEnvOrDefault("S3_BUCKET", "artifacts"), "S3 / MinIO default bucket")
+	configPath := flag.String("config", "", "Path to spider.yaml")
+	nodeID := flag.String("node-id", getEnvOrDefault("NODE_ID", hostname), "Node id")
+	port := flag.Int("port", 50052, "Peer gRPC port")
+	httpAddr := flag.String("http-addr", "", "HTTP addr for metrics/health")
+	advertiseAddr := flag.String("advertise-addr", getEnvOrDefault("ADVERTISE_ADDR", ""), "Advertised address")
+	trackerAddr := flag.String("tracker", getEnvOrDefault("TRACKER_ADDR", "127.0.0.1:50051"), "Tracker address")
+	cacheDir := flag.String("cache-dir", getEnvOrDefault("CACHE_DIR", config.DefaultDataDir), "Chunk cache dir")
+	region := flag.String("region", getEnvOrDefault("REGION", "us-east-1"), "Region")
+	zone := flag.String("zone", getEnvOrDefault("ZONE", "zone-a"), "Zone")
+	rack := flag.String("rack", getEnvOrDefault("RACK", "rack-1"), "Rack")
+	host := flag.String("host", getEnvOrDefault("HOST", hostname), "Host")
+	logFormat := flag.String("log-format", "", "text | json")
+	s3Endpoint := flag.String("s3-endpoint", getEnvOrDefault("MINIO_ENDPOINT", getEnvOrDefault("S3_ENDPOINT", "")), "S3 endpoint")
+	s3Bucket := flag.String("s3-bucket", getEnvOrDefault("S3_BUCKET", ""), "S3 bucket (enables S3 origin fallback when set)")
 	s3Region := flag.String("s3-region", getEnvOrDefault("AWS_REGION", "us-east-1"), "S3 region")
 	s3AccessKey := flag.String("s3-access-key", getEnvOrDefault("MINIO_ROOT_USER", getEnvOrDefault("AWS_ACCESS_KEY_ID", "minioadmin")), "S3 access key")
 	s3SecretKey := flag.String("s3-secret-key", getEnvOrDefault("MINIO_ROOT_PASSWORD", getEnvOrDefault("AWS_SECRET_ACCESS_KEY", "minioadmin")), "S3 secret key")
 	flag.Parse()
 
-	log.Printf("[Daemon] Initializing spiderd on node %s (port %d, cache: %s)...", *nodeID, *port, *cacheDir)
-
-	c, err := cache.NewCache(*cacheDir)
+	cfg, err := config.LoadFile(*configPath)
 	if err != nil {
-		log.Fatalf("Failed to initialize cache: %v", err)
+		fmt.Fprintf(os.Stderr, "config: %v\n", err)
+		os.Exit(1)
+	}
+	if *logFormat != "" {
+		cfg.LogFormat = *logFormat
+	}
+	if *httpAddr != "" {
+		cfg.HTTPAddr = *httpAddr
+	} else if cfg.Node.HTTPAddr != "" {
+		cfg.HTTPAddr = cfg.Node.HTTPAddr
+	}
+	if *cacheDir != "" {
+		cfg.DiskCache.Dir = *cacheDir
+	}
+	logging.SetDefault(cfg.LogFormat)
+
+	c, err := cache.NewCache(cfg.DiskCache.Dir)
+	if err != nil {
+		slog.Error("cache init", "err", err)
+		os.Exit(1)
+	}
+	mgr, err := cache.NewManager(c, cfg.DiskCache.MaxBytes, cfg.DiskCache.LowWatermark, cfg.DiskCache.HighWatermark)
+	if err != nil {
+		slog.Error("cache manager", "err", err)
+		os.Exit(1)
+	}
+	for _, id := range cfg.DiskCache.PinnedArtifacts {
+		if mf, err := c.GetManifest(id); err == nil {
+			_ = mgr.Pin(mf)
+			slog.Info("reconciled pin", "artifact", id)
+		}
 	}
 
-	loc := topology.Locality{
-		Region: *region,
-		Zone:   *zone,
-		Rack:   *rack,
-		Host:   *host,
-	}
+	loc := topology.Locality{Region: *region, Zone: *zone, Rack: *rack, Host: *host}
+
+	runCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 
 	var trackerClient proto.TrackerServiceClient
+	var trackerConn *grpc.ClientConn
 	if *trackerAddr != "" {
 		conn, err := grpc.Dial(*trackerAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
 		if err != nil {
-			log.Printf("[Daemon] Warning: could not connect to tracker at %s: %v", *trackerAddr, err)
+			slog.Warn("tracker dial", "addr", *trackerAddr, "err", err)
 		} else {
-			defer conn.Close()
+			trackerConn = conn
 			trackerClient = proto.NewTrackerServiceClient(conn)
 		}
 	}
@@ -156,8 +192,6 @@ func main() {
 	}
 
 	clientPool := peer.NewClientPool()
-	defer clientPool.Close()
-
 	eng := engine.NewEngine(engine.Config{
 		NodeID:        *nodeID,
 		Locality:      loc,
@@ -165,78 +199,72 @@ func main() {
 		TrackerClient: trackerClient,
 		ClientPool:    clientPool,
 		Materializer:  materializer.NewMaterializer(materializer.DefaultOptions()),
+		Scheduler:     scheduler.New(8),
 	})
 
 	s3Cfg := source.S3Config{
-		Bucket:       *s3Bucket,
-		Endpoint:     *s3Endpoint,
-		Region:       *s3Region,
-		AccessKey:    *s3AccessKey,
-		SecretKey:    *s3SecretKey,
-		UsePathStyle: true,
+		Bucket: *s3Bucket, Endpoint: *s3Endpoint, Region: *s3Region,
+		AccessKey: *s3AccessKey, SecretKey: *s3SecretKey, UsePathStyle: true,
 	}
+	handler := &daemonSyncHandler{nodeID: *nodeID, eng: eng, cache: c, mgr: mgr, s3: s3Cfg, runCtx: runCtx}
+	peerServer := peer.NewServer(*nodeID, c, handler)
 
-	syncHandler := &daemonSyncHandler{
-		nodeID:   *nodeID,
-		eng:      eng,
-		cache:    c,
-		s3Config: s3Cfg,
-	}
-
-	peerServer := peer.NewServer(*nodeID, c, syncHandler)
+	httpSrv := httpserver.Start(cfg.HTTPAddr, func(context.Context) error { return nil })
 
 	if trackerClient != nil {
 		go func() {
 			regCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			_, err := trackerClient.RegisterPeer(regCtx, &proto.RegisterPeerRequest{
-				Peer: &proto.PeerInfo{
-					NodeId:  *nodeID,
-					Address: advAddress,
-					Region:  *region,
-					Zone:    *zone,
-					Rack:    *rack,
-					Host:    *host,
-				},
+				Peer: &proto.PeerInfo{NodeId: *nodeID, Address: advAddress, Region: *region, Zone: *zone, Rack: *rack, Host: *host},
 			})
 			cancel()
 			if err != nil {
-				log.Printf("[Daemon] Tracker initial registration failed: %v", err)
+				slog.Warn("tracker register", "err", err)
 			} else {
-				log.Printf("[Daemon] Successfully registered with Tracker as %s (%s)", *nodeID, advAddress)
+				slog.Info("registered with tracker", "node", *nodeID, "addr", advAddress)
 			}
-
 			existingChunks, _ := c.ListChunks()
 			if len(existingChunks) > 0 {
 				repCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-				_, _ = trackerClient.ReportChunks(repCtx, &proto.ReportChunksRequest{
-					NodeId:      *nodeID,
-					ChunkHashes: existingChunks,
-				})
+				_, _ = trackerClient.ReportChunks(repCtx, &proto.ReportChunksRequest{NodeId: *nodeID, ChunkHashes: existingChunks})
 				cancel()
-				log.Printf("[Daemon] Reported %d existing cached chunks to tracker", len(existingChunks))
 			}
-
 			ticker := time.NewTicker(5 * time.Second)
 			defer ticker.Stop()
-			for range ticker.C {
-				hbCtx, hbCancel := context.WithTimeout(context.Background(), 3*time.Second)
-				_, _ = trackerClient.Heartbeat(hbCtx, &proto.HeartbeatRequest{NodeId: *nodeID})
-				hbCancel()
+			for {
+				select {
+				case <-runCtx.Done():
+					dctx, dcancel := context.WithTimeout(context.Background(), 3*time.Second)
+					_, _ = trackerClient.DeregisterPeer(dctx, &proto.DeregisterPeerRequest{NodeId: *nodeID})
+					dcancel()
+					return
+				case <-ticker.C:
+					hbCtx, hbCancel := context.WithTimeout(context.Background(), 3*time.Second)
+					_, _ = trackerClient.Heartbeat(hbCtx, &proto.HeartbeatRequest{NodeId: *nodeID})
+					hbCancel()
+					_, _ = mgr.MaybeEvict()
+					metrics.CacheUsedBytes.Set(float64(mgr.UsedBytes()))
+				}
 			}
 		}()
 	}
 
-	sigChan := make(chan os.Signal, 1)
-	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
-
 	go func() {
-		<-sigChan
-		log.Println("[Daemon] Shutting down spiderd gracefully...")
+		<-runCtx.Done()
+		slog.Info("shutting down spiderd")
+		_ = httpSrv.Shutdown(context.Background())
 		peerServer.Stop()
+		clientPool.Close()
+		if trackerConn != nil {
+			_ = trackerConn.Close()
+		}
+		stop()
 		os.Exit(0)
 	}()
 
+	slog.Info("spiderd listening", "node", *nodeID, "port", *port, "cache", cfg.DiskCache.Dir)
 	if err := peerServer.Start(*port); err != nil {
-		log.Fatalf("Peer server failed: %v", err)
+		slog.Error("peer server", "err", err)
+		os.Exit(1)
 	}
 }

@@ -43,4 +43,16 @@ func TestFilesystemSource(t *testing.T) {
 	if string(chunkBytes) != "ABCDEF" {
 		t.Fatalf("Expected 'ABCDEF', got %q", string(chunkBytes))
 	}
+
+	srcFile, err := NewPathSource(f1Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	only, err := srcFile.ListFiles(ctx, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(only) != 1 || only[0].Path != "weights.bin" || only[0].Size != int64(len(f1Data)) {
+		t.Fatalf("single file origin: %+v", only)
+	}
 }

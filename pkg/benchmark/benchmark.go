@@ -2,7 +2,6 @@ package benchmark
 
 import (
 	"context"
-	"crypto/rand"
 	"fmt"
 	"net"
 	"os"
@@ -38,77 +37,27 @@ type Suite struct {
 	baseTempDir string
 }
 
-// NewSuite creates a benchmark suite.
+// NewSuite creates a benchmark suite. Work caches go under baseTempDir (default tmp/work).
 func NewSuite(baseTempDir string) *Suite {
 	if baseTempDir == "" {
-		baseTempDir = os.TempDir()
+		baseTempDir = DefaultWorkRel
 	}
 	return &Suite{baseTempDir: baseTempDir}
 }
 
-// GenerateSyntheticData creates a multi-file model directory of specified size.
-func (s *Suite) GenerateSyntheticData(dir string, totalSizeBytes int64) error {
-	if err := os.MkdirAll(dir, 0755); err != nil {
-		return err
-	}
-
-	// Write small config
-	configData := []byte(fmt.Sprintf(`{"model_type": "spider_benchmark", "size_bytes": %d}`, totalSizeBytes))
-	if err := os.WriteFile(filepath.Join(dir, "config.json"), configData, 0644); err != nil {
-		return err
-	}
-
-	remaining := totalSizeBytes - int64(len(configData))
-	if remaining <= 0 {
-		remaining = 1024
-	}
-
-	// Write payload in shards
-	shardCount := 4
-	shardSize := remaining / int64(shardCount)
-	buf := make([]byte, 1024*1024) // 1MB buffer for generation
-
-	for i := 0; i < shardCount; i++ {
-		shardPath := filepath.Join(dir, fmt.Sprintf("model-%05d.safetensors", i+1))
-		f, err := os.Create(shardPath)
-		if err != nil {
-			return err
-		}
-
-		var written int64
-		for written < shardSize {
-			toWrite := int64(len(buf))
-			if shardSize-written < toWrite {
-				toWrite = shardSize - written
-			}
-			_, _ = rand.Read(buf[:toWrite])
-			n, err := f.Write(buf[:toWrite])
-			if err != nil {
-				f.Close()
-				return err
-			}
-			written += int64(n)
-		}
-		f.Close()
-	}
-
-	return nil
-}
-
 // RunComparison executes both Direct Origin and P2P Mesh transfers for workerCount nodes.
-func (s *Suite) RunComparison(ctx context.Context, artifactSizeBytes int64, workerCount int, chunkSize int64) (*ScenarioResult, *ScenarioResult, error) {
-	benchDir, err := os.MkdirTemp(s.baseTempDir, "spider-bench-*")
+// originPath is a file or directory used as the seed; it is not deleted.
+func (s *Suite) RunComparison(ctx context.Context, originPath string, workerCount int, chunkSize int64) (*ScenarioResult, *ScenarioResult, error) {
+	if err := os.MkdirAll(s.baseTempDir, 0755); err != nil {
+		return nil, nil, err
+	}
+	benchDir, err := os.MkdirTemp(s.baseTempDir, "run-*")
 	if err != nil {
 		return nil, nil, err
 	}
 	defer os.RemoveAll(benchDir)
 
-	originDir := filepath.Join(benchDir, "origin")
-	if err := s.GenerateSyntheticData(originDir, artifactSizeBytes); err != nil {
-		return nil, nil, fmt.Errorf("failed to generate synthetic data: %w", err)
-	}
-
-	originSrc, err := source.NewFilesystemSource(originDir)
+	originSrc, err := source.NewPathSource(originPath)
 	if err != nil {
 		return nil, nil, err
 	}

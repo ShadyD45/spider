@@ -27,6 +27,10 @@ go.work.sum
 # env file
 .env
 
+# Benchmark transfer payload and run scratch
+/tmp/
+dist/
+
 # Editor/IDE
 # .idea/
 # .vscode/

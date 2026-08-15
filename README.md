@@ -3,40 +3,29 @@
 [![Go Version](https://img.shields.io/badge/Go-1.22+-00ADD8?style=flat&logo=go)](https://go.dev/)
 [![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Architecture](https://img.shields.io/badge/Architecture-P2P%20Mesh-orange.svg)](#architecture)
-[![Status](https://img.shields.io/badge/Status-Phase%201%20PoC%20Complete-brightgreen.svg)](#roadmap)
+[![Status](https://img.shields.io/badge/Status-Early%20Development-yellow.svg)](#project-status)
+
+> **Project status:** Spider is in **early development** — Phase 2 hardening is largely implemented, but the project is **not production-ready**. APIs, config, and ops paths may change. Use for evaluation, benchmarking, and contribution only.
 
 **Spider** is a high-throughput, content-addressed, topology-aware P2P distribution mesh designed to distribute massive immutable artifacts (LLM/ML models, datasets, binaries, containers, and directory trees) across large compute fleets while drastically reducing origin storage (S3/MinIO) network traffic.
 
 ---
 
-## ⚡ Key Highlights & Benchmark Results
+## ⚡ Benchmarks (read before interpreting)
 
-### 1. Storage & Engine Microbenchmarks
-*Measurements taken on 11th Gen Intel(R) Core(TM) i5-11320H @ 3.20GHz:*
+Latest recorded numbers and methodology: **[docs/benchmarks.md](docs/benchmarks.md)**.
 
-| Primitive / Benchmark | Latency / Op | Effective Throughput | Memory Allocs |
-| :--- | :--- | :--- | :--- |
-| **SHA-256 Content-Addressing Hash** | 2.75 ms/op | **1,522.20 MB/s (1.52 GB/s)** | 3 allocs/op |
-| **Fixed 4 MiB Stream Chunking** | 23.2 ms/op | **722.41 MB/s** | 21 allocs/op |
-| **Atomic Cache Put (`tmp` $\to$ verify $\to$ rename)** | 10.4 ms/op | **402.72 MB/s** | 17 allocs/op |
+| Mode | What it measures | Recorded on this host (2026-08-15) |
+| :--- | :--- | :--- |
+| Micro (Go `bench`) | Chunker, SHA-256, cache Put | 631–1143 MB/s compute; ~67 MB/s atomic cache Put |
+| In-process loopback | Engine regression, 500 MB × 6 workers | **94.9% origin saved**; ~0.78× wall clock vs direct origin |
+| Compose fleet | Real `artifactd` + tracker + Grafana, 500 MB × 3 workers | **100% origin saved**; ~0.96× wall clock vs direct origin |
 
-### 2. Live Fleet Distribution Benchmark (`spiderctl benchmark`)
+**Do not read wall-clock alone as “Spider is slower/faster.”** On a single machine (loopback or Podman on one host), origin is already a fast local bind mount — P2P adds gRPC, tracker, and verification overhead without cross-network savings. The primary metric is **origin-byte reduction** (`origin_bytes_saved`, Prometheus `spider_origin_bytes_downloaded_total` vs `spider_peer_bytes_transferred_total`).
 
-#### 100 MB Model across 6 Concurrent Worker Nodes:
-```
-========================================================================
-  Spider Artifact Mesh — Automated Distribution Benchmark
-  Model Size: 100 MB | Workers: 6 | Chunk Size: 4 MB
-========================================================================
+**Pending:** Multi-machine benchmark on a **real worker fleet** with a remote seed and origin (separate hosts or AZs). Same-host compose results are useful for correctness and Grafana demos, not for predicting production wall-clock speedup. See [docs/benchmarks.md](docs/benchmarks.md#limitations-of-the-current-testbed).
 
-METRIC                    DIRECT ORIGIN (BASELINE)   SPIDER P2P MESH   IMPROVEMENT
-------                    ------------------------   ---------------   -----------
-Origin Data Transferred   600.00 MB                  0.00 MB           100.0% bandwidth saved
-Peer Data Transferred     0.00 MB                    600.00 MB         Offloaded to Mesh
-Fleet Chunks Resolved     174 / 174 chunks           174 / 174 chunks  100% SHA-256 Verified
-```
-* **Origin Storage Traffic Saved:** **100.0%** (Origin traffic dropped from 600 MB to 0 MB across workers).
-* **Self-Healing Fallback:** Workers seamlessly fall back to origin (S3/MinIO/FS) upon peer failure or network disruption without job failure.
+Grafana (after compose benchmark; on Podman Desktop for Windows use the [Podman VM IP](docs/benchmarks.md#grafana--prometheus), not always `localhost`): `/d/spider/spider-mesh` — `admin` / `admin`.
 
 ---
 
@@ -59,7 +48,27 @@ Fleet Chunks Resolved     174 / 174 chunks           174 / 174 chunks  100% SHA-
             ▼                                 ▼
    Distributed Peer Mesh           Materialized Directory Tree
    (gRPC Chunk Streaming)            (POSIX View for Apps/Inference)
+            │
+            ▼
+   Central Tracker (metadata only)
+   Store: SQLite / Postgres  |  Cache: memory / Redis
+   /metrics /healthz /readyz  |  YAML config (spider.yaml)
 ```
+
+### Phase 2 design (current)
+
+| Layer | Package / binary | Role |
+| :--- | :--- | :--- |
+| **Config** | `pkg/config`, `spider.yaml` | Store/cache drivers, pool tuning, disk cache watermarks, slog format |
+| **Tracker store** | `pkg/store` | Durable peers, artifact seeds, sparse chunk index (SQLite WAL default) |
+| **Tracker cache** | `pkg/metacache` | Optional Redis/memory fronting store reads |
+| **Scheduler** | `pkg/scheduler` | Locality rank, EWMA RTT, rarest-first, inflight caps, circuit breaker |
+| **Engine** | `pkg/engine` | Concurrent sync; peer fetch with inflight wait; origin fallback when configured |
+| **Cache manager** | `pkg/cache` | Refcounted LRU, pin/unpin, high/low watermarks |
+| **Observability** | `pkg/metrics`, `pkg/httpserver` | Prometheus metrics; health/readiness on tracker and workers |
+| **Build / deploy** | `scripts/build-binaries.*`, `Containerfile` | Cross-compile on host → slim Alpine runtime image (`localhost/spider:local`) |
+
+Publish registers chunks and seeds under `--node-id` (not a anonymous `"publisher"` id). S3/MinIO origin fallback is enabled only when `S3_BUCKET` is explicitly set — not from endpoint env alone.
 
 ### Core Design Principles
 1. **Artifact-First, Not Model-First**: Treats models, checkpoints, datasets, or software releases as arbitrary multi-file trees of immutable content-addressed chunks.
@@ -74,36 +83,29 @@ Fleet Chunks Resolved     174 / 174 chunks           174 / 174 chunks  100% SHA-
 
 ```text
 spider/
-├── Containerfile                  # Multi-stage container build (Alpine runtime)
-├── podman-compose.yml             # Local multi-node testbed (MinIO + Tracker + 3 Workers)
-├── docker-compose.yml             # Docker-compatible testbed definition
-├── buf.yaml / buf.gen.yaml        # Protobuf compiler configuration
-├── api/
-│   └── v1/
-│       ├── manifest.go            # Manifest JSON schema, generator & SHA-256 ID calculator
-│       └── proto/
-│           ├── tracker.proto      # Tracker gRPC protocol
-│           └── peer.proto         # Peer gRPC streaming protocol
-├── cmd/
-│   ├── spiderctl/ / artifactctl/  # Publisher & node management CLI
-│   ├── spiderd/ / artifactd/      # Node daemon process
-│   └── tracker/                   # Central metadata tracker daemon
+├── Containerfile                  # Slim runtime image (copies dist/linux/* only)
+├── spider.yaml                    # Example daemon/tracker config
+├── podman-compose.yml             # Local testbed: MinIO, tracker, Redis, 3 workers, Prometheus, Grafana
+├── docker-compose.yml             # Docker-compatible testbed
+├── deploy/                        # Compose config, Prometheus, Grafana provisioning
+├── api/v1/                        # Manifest schema + tracker/peer protobuf
+├── cmd/                           # tracker, spiderd/artifactd, spiderctl/artifactctl
 ├── pkg/
-│   ├── benchmark/                 # Automated benchmark suite and scenario runner
-│   ├── cache/                     # Disk-backed atomic verified chunk store
-│   ├── chunk/                     # 4 MiB chunker and SHA-256 hash calculator
-│   ├── engine/                    # Concurrent P2P scheduler & fallback manager
-│   ├── materializer/              # Reconstructs directory trees from chunks
-│   ├── peer/                      # gRPC stream chunk server & client
-│   ├── source/                    # Storage adapters (Local FS, AWS S3, MinIO)
-│   ├── topology/                  # Locality scoring (Host/Rack/Zone/Region)
-│   ├── tracker/                   # Central in-memory registry & peer matcher
-│   └── verifier/                  # Cryptographic chunk audit & directory verifier
+│   ├── benchmark/                 # In-process fleet benchmark + payload helpers
+│   ├── cache/                     # Chunk store + refcounted manager (LRU, pins)
+│   ├── config/                    # YAML loader, SQL/Redis pool defaults
+│   ├── engine/                    # Sync scheduler, peer fetch, origin fallback
+│   ├── metacache/                 # Tracker metadata cache (memory / Redis)
+│   ├── metrics/                   # Prometheus counters/histograms
+│   ├── scheduler/                 # Peer rank, inflight, circuit breaker
+│   ├── store/                     # Pluggable tracker backing store (SQLite, …)
+│   └── …                          # chunk, materializer, peer, source, topology, verifier
 └── scripts/
-    ├── generate-test-data.sh      # Synthetic model generator
-    ├── podman-poc-test.sh         # 6 E2E validation experiments
-    ├── run-benchmarks.sh          # Linux/macOS benchmark runner
-    └── run-benchmarks.ps1         # Windows PowerShell benchmark runner
+    ├── build-binaries.{sh,ps1}    # GOOS=linux cross-compile → dist/linux/
+    ├── build-image.{sh,ps1}       # podman/docker build localhost/spider:local
+    ├── run-compose-benchmark.*    # Fleet benchmark against compose stack + Grafana
+    ├── run-benchmarks.*           # Micro + optional in-process + compose
+    └── podman-poc-test.sh         # E2E validation experiments
 ```
 
 ---
@@ -141,7 +143,7 @@ Spider enforces end-to-end cryptographic integrity verification across 5 distinc
 ./bin/spiderctl verify artifact --manifest=manifest.json --dest=/models/llama-3-8b/1.0.0
 
 # 2. Audit local chunk cache against silent disk corruption / bit-rot
-./bin/spiderctl verify cache --cache-dir=/var/lib/artifactd
+./bin/spiderctl verify cache --cache-dir=/var/lib/spider
 ```
 
 ---
@@ -153,17 +155,35 @@ Spider enforces end-to-end cryptographic integrity verification across 5 distinc
 - (Optional) Podman / Docker for containerized cluster simulation
 
 ### 1. Build Binaries
+
+**Local (Windows/macOS/Linux):**
 ```bash
 go build -o bin/tracker ./cmd/tracker
 go build -o bin/spiderd ./cmd/spiderd
 go build -o bin/spiderctl ./cmd/spiderctl
 ```
 
+**Container image** (cross-compile on host, copy into slim Alpine image — no `go build` in the Containerfile):
+```bash
+./scripts/build-image.sh          # Linux/macOS
+./scripts/build-image.ps1         # Windows
+podman-compose -f podman-compose.yml up -d
+```
+
+**Compose fleet benchmark** (real tracker + workers + Grafana):
+```bash
+./scripts/run-compose-benchmark.sh
+./scripts/run-compose-benchmark.ps1
+```
+
 ### 2. Run Benchmarks
 Run the built-in automated benchmark suite to compare Direct Origin vs. Spider P2P Mesh:
 ```bash
-# Run 100 MB model across 6 worker nodes
-./bin/spiderctl benchmark --size=100 --workers=6 --chunk-size=4
+# Run 500 MB model across 6 worker nodes (payload: tmp/origin/payload.bin)
+./bin/spiderctl benchmark --size=500 --workers=6 --chunk-size=4
+
+# Use a different file or directory as the origin
+./bin/spiderctl benchmark --file=/path/to/weights.bin --workers=6 --chunk-size=4
 
 # Run Go engine microbenchmarks
 go test -bench=Benchmark -benchmem ./pkg/chunk ./pkg/cache
@@ -214,24 +234,37 @@ go test -bench=Benchmark -benchmem ./pkg/chunk ./pkg/cache
 ```bash
 ./bin/spiderctl status --daemon=127.0.0.1:50053
 ./bin/spiderctl peers --tracker=127.0.0.1:50051
-./bin/spiderctl cache --cache-dir=/var/lib/artifactd
+./bin/spiderctl cache --cache-dir=/var/lib/spider
+./bin/spiderctl pin --manifest=manifest.json --cache-dir=/var/lib/spider
+./bin/spiderctl unpin --artifact-id=sha256:... --cache-dir=/var/lib/spider
 ```
 
 ---
 
 ## 🐳 Containerized Multi-Node Testbed
 
-Spider includes a complete containerized simulation environment with MinIO origin storage, central tracker, and 3 worker nodes located in different simulated racks and zones.
+MinIO origin, SQLite tracker with **Redis metadata cache**, Prometheus, Grafana, and 3 workers sharing one pre-built image.
 
 ```bash
-# Start cluster
-podman-compose up -d --build
-# or
-docker-compose up -d --build
+./scripts/build-binaries.sh && ./scripts/build-image.sh
+podman compose -f podman-compose.yml up -d
+# or: ./scripts/run-compose-benchmark.sh   # benchmark + leave stack up for Grafana
 
-# Run automated validation battery (6 E2E experiments)
+# Grafana: http://<podman-vm-ip>:3000/d/spider/spider-mesh  (admin / admin)
+# See docs/benchmarks.md if localhost does not forward on Windows.
+
 ./scripts/podman-poc-test.sh
 ```
+
+Numbers and interpretation caveats: [docs/benchmarks.md](docs/benchmarks.md).
+
+---
+
+## 📋 Pending / known gaps
+
+- [ ] **Multi-machine fleet benchmark** — workers and seed on separate hosts with remote S3/MinIO origin (current compose runs on one machine; wall-clock ≈ origin is expected).
+- [ ] Phase 3: mTLS, signed manifests, RBAC
+- [ ] Phase 4+: Kubernetes operator, multi-region scale, ML/GPU transports
 
 ---
 
@@ -240,7 +273,7 @@ docker-compose up -d --build
 | Phase | Plan Document | Status | Focus |
 |---|---|---|---|
 | **Phase 1** | [`01-poc-and-podman`](docs/plans/phase-1-poc-and-podman-environment.md) | ✅ **Complete** | Core Go primitives, gRPC chunk streaming, tracker, atomic cache, CLI, and benchmark harness. |
-| **Phase 2** | [`02-core-reliability`](docs/plans/phase-2-core-reliability-and-hardening.md) | 📋 Planned | Persistent SQLite/Postgres tracker DB, adaptive download scheduler, LRU cache eviction & pinning, Prometheus metrics. |
+| **Phase 2** | [`02-core-reliability`](docs/plans/phase-2-core-reliability-and-hardening.md) | 🚧 **In progress** | Pluggable Store+Cache (SQLite/Postgres, memory/Redis), seed locate, swarm scheduler, refcounted LRU pins, Prometheus/health, YAML. Implemented; hardening and docs ongoing. |
 | **Phase 3** | [`03-security-auth`](docs/plans/phase-3-security-and-authorization.md) | 📋 Planned | Mutual TLS (mTLS), Ed25519 signed manifests, RBAC, path traversal policies. |
 | **Phase 4** | [`04-k8s-operator`](docs/plans/phase-4-kubernetes-operator-and-crds.md) | 📋 Planned | `ArtifactDeployment` CRD, Kubernetes Operator (`cmd/controller`), `spiderd` DaemonSet manifests. |
 | **Phase 5** | [`05-scale-transports`](docs/plans/phase-5-multi-region-scale-and-transports.md) | 📋 Planned | Multi-region hierarchical control plane, zero-copy `splice` streaming, FastCDC chunking. |
@@ -250,3 +283,9 @@ docker-compose up -d --build
 
 ## 📄 License
 MIT License. See [LICENSE](LICENSE) for details.
+
+---
+
+## Project status
+
+Spider is **experimental software in active development**. It is suitable for local PoC, compose testbeds, and benchmarks — **not** for production artifact distribution without a full security, ops, and multi-node validation pass. Contributions and feedback welcome.

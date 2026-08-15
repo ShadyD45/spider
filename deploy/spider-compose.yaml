@@ -1,0 +1,29 @@
+store:
+  driver: sqlite
+  dsn: /var/lib/spider/tracker.db
+  pool:
+    maxOpenConns: 8
+    maxIdleConns: 8
+cache:
+  driver: redis
+  ttl: 10s
+  redis:
+    addr: redis:6379
+    prefix: "spider:"
+    pool:
+      maxOpenConns: 16
+      maxIdleConns: 8
+      minIdleConns: 2
+      dialTimeout: 3s
+      readTimeout: 2s
+      writeTimeout: 2s
+      poolTimeout: 4s
+      connMaxIdleTime: 5m
+httpAddr: ":9090"
+logFormat: json
+diskCache:
+  dir: /var/lib/spider
+  maxBytes: 536870912000
+  lowWatermark: 0.80
+  highWatermark: 0.90
+  pinnedArtifacts: []

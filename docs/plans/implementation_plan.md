@@ -15,7 +15,7 @@ graph TD
     Phase5 --> Phase6[Phase 6: High-Speed ML / GPU Extensions]
 ```
 
-### **Phase 1: Proof-of-Concept (PoC) & Local Podman Environment** *(Current Focus)*
+### **Phase 1: Proof-of-Concept (PoC) & Local Podman Environment** *(Complete)*
 * **Goal**: Validate core content-addressed P2P distribution, origin bandwidth reduction, verification, and crash resilience without external dependencies like Kubernetes.
 * **Tech Stack**: Go 1.22+, gRPC / Protocol Buffers, AWS SDK v2 / MinIO Go SDK, Podman & Podman Compose.
 * **Deliverables**:
@@ -29,11 +29,13 @@ graph TD
   8. `cmd/artifactctl` / `cmd/spiderctl`: Publisher and management CLI (`publish`, `inspect`, `sync`, `status`, `peers`, `cache`, `verify`).
   9. `deploy/podman`: Podman Compose configuration and setup scripts simulating MinIO seed storage, central tracker, and 3+ worker nodes across simulated racks/zones.
 
-### **Phase 2: Framework Hardening & Core Reliability**
-* Persistent Metadata DB for Tracker (PostgreSQL / SQLite WAL mode).
-* Advanced Download Scheduler: Peer bandwidth throttling, dynamic peer ranking based on measured latency/throughput, exponential backoff retries.
-* Cache Eviction & Garbage Collection: LRU eviction, disk quota management, artifact pinning.
-* Comprehensive Observability: Prometheus metrics (`origin_bytes_saved`, `peer_bytes_transferred`, sync durations) and structured JSON logging.
+### **Phase 2: Framework Hardening & Core Reliability** *(Current Focus)*
+* Pluggable `Store` (memory / SQLite WAL / Postgres) and metadata `Cache` (none / memory / Redis) with write-path invalidation. **No GORM.**
+* Compact seed advertisements (`ReportArtifact` / `LocateArtifact`); per-chunk rows only for partial nodes.
+* Swarm scheduler: locality + EWMA + rarest-first + per-peer caps + circuit breaker.
+* Refcounted disk LRU, pins, `spiderd` reconciles `pinnedArtifacts`.
+* YAML config, slog, Prometheus `client_golang`, `/healthz` `/readyz`.
+* `sync` prints reused / peer / origin / `origin_bytes_saved`. Path-join guard in materializer. Copy default; hardlink optional.
 
 ### **Phase 3: Enterprise Security & Auth**
 * mTLS for all gRPC communication (daemon-to-daemon, daemon-to-tracker).
@@ -178,8 +180,8 @@ The PoC environment will be managed using **Podman** containers on a custom netw
 
 ## 4. Open Questions
 
-> [!IMPORTANT]
-> **1. Chunk Materialization Strategy**: For local file tree materialization from the chunk store, should we default to **file copying** or **hardlinking**? Hardlinks save disk space and provide zero-copy instantiation when `/var/lib/artifactd` is on the same filesystem.
+> [!NOTE]
+> **1. Chunk Materialization Strategy**: Default is **file copying** (cross-device safe). Hardlinking is optional when cache and destination share a filesystem.
 
 > [!NOTE]
 > **2. MinIO S3 Credentials**: For automated Podman local testing, is hardcoding standard dev credentials (`minioadmin` / `minioadmin`) in `podman-compose.yml` acceptable?
