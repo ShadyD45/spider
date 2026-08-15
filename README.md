@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="spider.png" alt="Spider — peer-to-peer artifact distribution" width="520">
+</p>
+
 # Spider: Distributed Artifact Fabric (DAF)
 
 [![Go Version](https://img.shields.io/badge/Go-1.22+-00ADD8?style=flat&logo=go)](https://go.dev/)
