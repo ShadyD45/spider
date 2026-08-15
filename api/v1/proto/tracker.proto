@@ -1,0 +1,81 @@
+syntax = "proto3";
+
+package api.v1;
+
+option go_package = "spider/api/v1/proto;proto";
+
+service TrackerService {
+  rpc RegisterPeer(RegisterPeerRequest) returns (RegisterPeerResponse);
+  rpc Heartbeat(HeartbeatRequest) returns (HeartbeatResponse);
+  rpc ReportChunks(ReportChunksRequest) returns (ReportChunksResponse);
+  rpc LocateChunks(LocateChunksRequest) returns (LocateChunksResponse);
+  rpc ListPeers(ListPeersRequest) returns (ListPeersResponse);
+  rpc GetArtifactStatus(GetArtifactStatusRequest) returns (GetArtifactStatusResponse);
+}
+
+message PeerInfo {
+  string node_id = 1;
+  string address = 2;
+  string region = 3;
+  string zone = 4;
+  string rack = 5;
+  string host = 6;
+  int64 last_seen_unix = 7;
+}
+
+message RegisterPeerRequest {
+  PeerInfo peer = 1;
+}
+
+message RegisterPeerResponse {
+  bool success = 1;
+  string message = 2;
+}
+
+message HeartbeatRequest {
+  string node_id = 1;
+}
+
+message HeartbeatResponse {
+  bool acknowledged = 1;
+}
+
+message ReportChunksRequest {
+  string node_id = 1;
+  repeated string chunk_hashes = 2;
+}
+
+message ReportChunksResponse {
+  int64 chunks_recorded = 1;
+}
+
+message LocateChunksRequest {
+  string requester_node_id = 1;
+  repeated string chunk_hashes = 2;
+}
+
+message ChunkLocation {
+  string chunk_hash = 1;
+  repeated PeerInfo peers = 2;
+}
+
+message LocateChunksResponse {
+  repeated ChunkLocation locations = 1;
+}
+
+message ListPeersRequest {}
+
+message ListPeersResponse {
+  repeated PeerInfo peers = 1;
+}
+
+message GetArtifactStatusRequest {
+  string artifact_id = 1;
+}
+
+message GetArtifactStatusResponse {
+  string artifact_id = 1;
+  int64 total_chunks = 2;
+  int64 completed_chunks = 3;
+  repeated string ready_nodes = 4;
+}

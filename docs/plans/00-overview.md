@@ -64,7 +64,7 @@ External Source (S3/MinIO/FS)
 1. **Artifact-First, Not Model-First**: The core distribution engine operates on arbitrary file trees and immutable byte chunks without coupling to specific ML frameworks or tensor formats.
 2. **Strict Control / Data Plane Separation**: Control plane (Tracker/Registry) manages metadata and peer locations; data plane streams bytes directly between workers or origin storage. Control plane **never proxies payload bytes**.
 3. **Reconciliation Over Imperative Commands**: Declarative desired state (`artifact X@v2 must exist on target nodes`). Workers independently reconcile toward state.
-4. **Content Addressing & Verification**: Every chunk is addressed by cryptographic hash (SHA-256). Every chunk received over P2P is strictly verified before committing to cache or advertising availability.
+4. **Content Addressing & Verification**: Every chunk is addressed by cryptographic hash (SHA-256). Bytes are verified on the wire, re-hashed from durable cache files before commit, re-hashed again during materialization, and can be audited offline via `pkg/verifier` / `spiderctl verify`.
 5. **Kubernetes is Optional**: The core engine (`artifactd`, `tracker`, `artifactctl`) runs standalone anywhere (bare metal, containers, VM). Kubernetes operator is an integration layer on top.
 6. **Local Testing Engine**: Local environment uses **Podman** containers (`podman-compose`) to simulate multi-node topologies, origin storage (MinIO), and failure scenarios.
 
@@ -72,9 +72,9 @@ External Source (S3/MinIO/FS)
 
 ## Navigation & Phase Plans
 
-- [Phase 1: Proof-of-Concept & Podman Environment Plan](file:///d:/Projects/artifact-mesh/docs/plans/phase-1-poc-and-podman-environment.md)
-- [Phase 2: Core Reliability & Framework Hardening Plan](file:///d:/Projects/artifact-mesh/docs/plans/phase-2-core-reliability-and-hardening.md)
-- [Phase 3: Security & Enterprise Authorization Plan](file:///d:/Projects/artifact-mesh/docs/plans/phase-3-security-and-authorization.md)
-- [Phase 4: Kubernetes Operator & CRD Plan](file:///d:/Projects/artifact-mesh/docs/plans/phase-4-kubernetes-operator-and-crds.md)
-- [Phase 5: Multi-Region Scale & Advanced Transports Plan](file:///d:/Projects/artifact-mesh/docs/plans/phase-5-multi-region-scale-and-transports.md)
-- [Phase 6: High-Speed ML & GPU Acceleration Extensions Plan](file:///d:/Projects/artifact-mesh/docs/plans/phase-6-ml-and-gpu-acceleration-extensions.md)
+- [Phase 1: Proof-of-Concept & Podman Environment Plan](file:///d:/Projects/spider/docs/plans/phase-1-poc-and-podman-environment.md)
+- [Phase 2: Core Reliability & Framework Hardening Plan](file:///d:/Projects/spider/docs/plans/phase-2-core-reliability-and-hardening.md)
+- [Phase 3: Security & Enterprise Authorization Plan](file:///d:/Projects/spider/docs/plans/phase-3-security-and-authorization.md)
+- [Phase 4: Kubernetes Operator & CRD Plan](file:///d:/Projects/spider/docs/plans/phase-4-kubernetes-operator-and-crds.md)
+- [Phase 5: Multi-Region Scale & Advanced Transports Plan](file:///d:/Projects/spider/docs/plans/phase-5-multi-region-scale-and-transports.md)
+- [Phase 6: High-Speed ML & GPU Acceleration Extensions Plan](file:///d:/Projects/spider/docs/plans/phase-6-ml-and-gpu-acceleration-extensions.md)

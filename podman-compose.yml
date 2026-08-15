@@ -1,0 +1,84 @@
+version: '3.8'
+
+networks:
+  artifact-net:
+    driver: bridge
+
+services:
+  minio:
+    image: docker.io/minio/minio:latest
+    container_name: minio-origin
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    networks:
+      - artifact-net
+
+  central-tracker:
+    build:
+      context: .
+      dockerfile: Containerfile
+    container_name: central-tracker
+    command: ["tracker", "--port=50051"]
+    ports:
+      - "50051:50051"
+    networks:
+      - artifact-net
+
+  worker-1:
+    build:
+      context: .
+      dockerfile: Containerfile
+    container_name: worker-node-1
+    command: ["artifactd", "--node-id=worker-1", "--advertise-addr=worker-1:50052", "--port=50052", "--tracker=central-tracker:50051", "--rack=rack-1", "--zone=zone-a"]
+    environment:
+      - MINIO_ENDPOINT=http://minio:9000
+      - MINIO_ROOT_USER=minioadmin
+      - MINIO_ROOT_PASSWORD=minioadmin
+    ports:
+      - "50052:50052"
+    networks:
+      - artifact-net
+    depends_on:
+      - central-tracker
+      - minio
+
+  worker-2:
+    build:
+      context: .
+      dockerfile: Containerfile
+    container_name: worker-node-2
+    command: ["artifactd", "--node-id=worker-2", "--advertise-addr=worker-2:50052", "--port=50052", "--tracker=central-tracker:50051", "--rack=rack-1", "--zone=zone-a"]
+    environment:
+      - MINIO_ENDPOINT=http://minio:9000
+      - MINIO_ROOT_USER=minioadmin
+      - MINIO_ROOT_PASSWORD=minioadmin
+    ports:
+      - "50053:50052"
+    networks:
+      - artifact-net
+    depends_on:
+      - central-tracker
+      - minio
+
+  worker-3:
+    build:
+      context: .
+      dockerfile: Containerfile
+    container_name: worker-node-3
+    command: ["artifactd", "--node-id=worker-3", "--advertise-addr=worker-3:50052", "--port=50052", "--tracker=central-tracker:50051", "--rack=rack-2", "--zone=zone-b"]
+    environment:
+      - MINIO_ENDPOINT=http://minio:9000
+      - MINIO_ROOT_USER=minioadmin
+      - MINIO_ROOT_PASSWORD=minioadmin
+    ports:
+      - "50054:50052"
+    networks:
+      - artifact-net
+    depends_on:
+      - central-tracker
+      - minio

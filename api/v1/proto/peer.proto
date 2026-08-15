@@ -1,0 +1,57 @@
+syntax = "proto3";
+
+package api.v1;
+
+option go_package = "spider/api/v1/proto;proto";
+
+service PeerService {
+  rpc GetChunk(GetChunkRequest) returns (stream ChunkDataChunk);
+  rpc SyncArtifact(SyncArtifactRequest) returns (SyncArtifactResponse);
+  rpc GetNodeStatus(GetNodeStatusRequest) returns (GetNodeStatusResponse);
+}
+
+message GetChunkRequest {
+  string chunk_hash = 1;
+}
+
+message ChunkDataChunk {
+  bytes payload = 1;
+  int64 offset = 2;
+  int64 total_size = 3;
+  bool is_eof = 4;
+}
+
+message SyncArtifactRequest {
+  string manifest_json = 1;
+  string destination_path = 2;
+  string origin_type = 3;
+  string origin_uri = 4;
+}
+
+message SyncArtifactResponse {
+  bool accepted = 1;
+  string job_id = 2;
+  string message = 3;
+}
+
+message GetNodeStatusRequest {
+  string job_id = 1;
+}
+
+message SyncJobStatus {
+  string job_id = 1;
+  string artifact_id = 2;
+  string status = 3;
+  int64 total_chunks = 4;
+  int64 downloaded_chunks = 5;
+  int64 peer_chunks = 6;
+  int64 origin_chunks = 7;
+  string error_message = 8;
+}
+
+message GetNodeStatusResponse {
+  string node_id = 1;
+  int64 cached_chunks = 2;
+  int64 total_bytes_cached = 3;
+  repeated SyncJobStatus active_jobs = 4;
+}

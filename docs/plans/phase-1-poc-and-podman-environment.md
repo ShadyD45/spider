@@ -49,7 +49,8 @@ artifact-mesh/
 │   ├── tracker/                   # Tracker registry & in-memory peer map
 │   ├── peer/                      # gRPC stream chunk server & client helper
 │   ├── engine/                    # Concurrent download scheduler & fallback manager
-│   └── topology/                  # Locality scoring (Host > Rack > Zone > Region)
+│   ├── topology/                  # Locality scoring (Host > Rack > Zone > Region)
+│   └── verifier/                  # SHA-256 cache audit & materialized-directory verifier
 └── scripts/
     ├── generate-test-data.sh      # Synthetic data generator for benchmarks
     └── podman-poc-test.sh         # E2E test runner executing 6 validation experiments
@@ -79,12 +80,13 @@ artifact-mesh/
   ```
 - **Atomic Persistence**:
   1. Download chunk to `/var/lib/artifactd/tmp/<hash>.tmp`.
-  2. Compute SHA-256 hash of written bytes.
+  2. `fsync` the temp file, then compute SHA-256 of the **on-disk** bytes.
   3. If hash matches expected hash, rename atomically (`os.Rename`) to `/var/lib/artifactd/chunks/sha256/xx/xxxx...`.
-  4. If hash does NOT match, delete temporary file and return hash mismatch error.
+  4. If hash does NOT match, delete temporary file and return `ErrHashMismatch`.
 
 ### 3.3 Materializer (`pkg/materializer`)
 - Construct physical target directory from verified chunk store.
+- Re-hashes every chunk while copying (or before hardlinking) so a bit-rotten cache cannot produce a READY artifact.
 - Supports **file copying** or **hardlinking** (configurable, default copying for cross-device safety).
 - Validates total file sizes and mode permissions upon completion.
 
@@ -121,12 +123,23 @@ type Source interface {
   6. Verify SHA-256, move to cache atomically, and notify Tracker via `ReportChunks`.
   7. Once all chunks are ready, invoke `Materializer` to instantiate local artifact folder and set status `READY`.
 
-### 3.7 Publisher & Admin CLI (`cmd/artifactctl`)
-- `artifactctl publish --source s3://bucket/gpt-x/v2 --name gpt-x --version 2.0`
-- `artifactctl sync --artifact gpt-x@2.0 --dest /models/gpt-x/2.0`
-- `artifactctl inspect --manifest sha256:...`
-- `artifactctl status`
-- `artifactctl cache list`
+### 3.7 Publisher & Admin CLI (`cmd/spiderctl`, `cmd/artifactctl`)
+- `spiderctl publish --source s3://bucket/gpt-x/v2 --name gpt-x --version 2.0`
+- `spiderctl sync --manifest manifest.json --dest /models/gpt-x/2.0`
+- `spiderctl inspect --manifest manifest.json`
+- `spiderctl status`
+- `spiderctl cache`
+- `spiderctl benchmark --size 100 --workers 6`
+- `spiderctl verify artifact --manifest manifest.json --dest /models/gpt-x/2.0`
+- `spiderctl verify cache --cache-dir /var/lib/artifactd`
+
+### 3.8 Cryptographic Verification & Integrity Auditing (`pkg/verifier`)
+- **Per-Chunk SHA-256 Audit**: Re-verifies every chunk on disk against its hash name to detect bit-rot or silent data corruption.
+- **Materialized File Validation**: Inspects entire materialized directories against canonical manifest (verifying file presence, sizes, modes, and computing SHA-256 hashes of every slice).
+- **Corrupt Stream Rejection & Recovery**: Rejects corrupted peer stream frames and automatically recovers clean chunks from origin storage without workflow interruption.
+- **Unit coverage**: cache mismatch, peer stream mismatch, origin mismatch, materializer abort on cache bit-rot, directory size/tamper/missing-file reports.
+
+**Status (Phase 1 PoC):** Implemented in `pkg/cache`, `pkg/peer`, `pkg/engine`, `pkg/materializer`, `pkg/verifier`, and `spiderctl verify`.
 
 ---
 
@@ -248,8 +261,11 @@ The script `scripts/podman-poc-test.sh` executes the following benchmark test ba
 - [ ] Create repository skeleton and `go.mod` (Go 1.22+).
 - [ ] Implement `api/v1/manifest.go` (JSON canonicalization, SHA-256 identity).
 - [ ] Implement `pkg/chunk` (4 MiB fixed chunking & hash generation).
-- [ ] Implement `pkg/cache` (Atomic tmp-to-store move, directory layout).
-- [ ] Implement `pkg/materializer` (File tree builder).
+- [x] Implement `pkg/cache` (Atomic tmp-to-store move, directory layout, on-disk SHA-256 before rename).
+- [x] Implement `pkg/materializer` (File tree builder with per-chunk re-hash).
+- [x] Implement `pkg/verifier` (cache audit + materialized directory verification).
+- [x] Implement `spiderctl verify artifact|cache` CLI.
+- [x] Unit tests for hash mismatch (cache, peer, origin, materializer, verifier).
 - [ ] Implement `pkg/source` (Filesystem & S3/MinIO drivers).
 - [ ] Define Protobuf contracts (`tracker.proto`, `peer.proto`).
 - [ ] Implement `pkg/tracker` & `cmd/tracker` (Central registration & location server).

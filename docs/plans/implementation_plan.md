@@ -21,12 +21,13 @@ graph TD
 * **Deliverables**:
   1. `pkg/chunk`: Fixed 4 MiB chunker with SHA-256 content addressing.
   2. `pkg/cache`: Disk-backed content-addressed store (`/var/lib/artifactd/chunks/...`) with atomic writes (`tmp` -> rename).
-  3. `pkg/materializer`: Reconstructs original physical directory tree/files from verified chunk cache.
+  3. `pkg/materializer`: Reconstructs original physical directory tree/files from verified chunk cache (re-hashes each chunk while copying).
   4. `pkg/source`: Extensible storage adapter interface with Local Filesystem and S3/MinIO drivers.
-  5. `cmd/tracker`: Centralized gRPC service for peer heartbeats, chunk locations, and topology ranking.
-  6. `cmd/artifactd`: Node daemon handling local REST/gRPC API, P2P gRPC streaming transfers (`GetChunk`), transfer scheduling, and crash resume.
-  7. `cmd/artifactctl`: Publisher and management CLI (`publish`, `inspect`, `sync`, `status`, `peers`, `cache`).
-  8. `deploy/podman`: Podman Compose configuration and setup scripts simulating MinIO seed storage, central tracker, and 3+ worker nodes across simulated racks/zones.
+  5. `pkg/verifier`: Offline SHA-256 audit of cache shards and materialized directories (`spiderctl verify`).
+  6. `cmd/tracker`: Centralized gRPC service for peer heartbeats, chunk locations, and topology ranking.
+  7. `cmd/artifactd`: Node daemon handling local REST/gRPC API, P2P gRPC streaming transfers (`GetChunk`), transfer scheduling, and crash resume.
+  8. `cmd/artifactctl` / `cmd/spiderctl`: Publisher and management CLI (`publish`, `inspect`, `sync`, `status`, `peers`, `cache`, `verify`).
+  9. `deploy/podman`: Podman Compose configuration and setup scripts simulating MinIO seed storage, central tracker, and 3+ worker nodes across simulated racks/zones.
 
 ### **Phase 2: Framework Hardening & Core Reliability**
 * Persistent Metadata DB for Tracker (PostgreSQL / SQLite WAL mode).
@@ -191,8 +192,9 @@ The PoC environment will be managed using **Podman** containers on a custom netw
 ## 5. Verification Plan
 
 ### Automated Tests
-- `go test ./pkg/... -v`: Unit tests for chunker, cache, manifest parsing, topology scoring, and source adapters.
+- `go test ./pkg/... -v`: Unit tests for chunker, cache, manifest parsing, topology scoring, source adapters, **SHA-256 chunk/file verification**, corrupt-peer rejection, and origin hash mismatch.
 - `./scripts/podman-poc-test.sh`: Full end-to-end Podman multi-container benchmark execution verifying P2P speedup, crash resume, chunk corruption handling, and origin bandwidth reduction.
 
 ### Manual Verification
-- CLI test using `artifactctl publish` -> `artifactctl sync` -> `artifactctl status` across Podman containers.
+- CLI test using `spiderctl publish` -> `spiderctl sync` -> `spiderctl verify artifact` -> `spiderctl status` across Podman containers.
+- Cache bit-rot audit: `spiderctl verify cache --cache-dir /var/lib/artifactd`.
