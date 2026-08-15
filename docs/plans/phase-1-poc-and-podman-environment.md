@@ -12,11 +12,11 @@ Phase 1 establishes a fully functional end-to-end Proof-of-Concept (PoC) for the
 
 ### Key Objectives
 1. Implement the **Artifact Manifest**, **Chunker**, and **SHA-256 Content Addressing**.
-2. Build the **Content-Addressed Local Cache** (`/var/lib/artifactd/chunks`) with atomic verification (`tmp` -> rename).
+2. Build the **Content-Addressed Local Cache** (`/var/lib/spider/chunks`) with atomic verification (`tmp` -> rename).
 3. Implement **Source Adapters** for Local Filesystem and S3/MinIO origin storage.
 4. Implement the **Central Tracker** service for peer registration, heartbeat tracking, and chunk availability matching.
-5. Implement the **`artifactd` Node Daemon** with a gRPC chunk streaming server and concurrent download engine.
-6. Implement the **`artifactctl` CLI** for publishing, inspecting, syncing, and querying nodes.
+5. Implement the **`spiderd` Node Daemon** with a gRPC chunk streaming server and concurrent download engine.
+6. Implement the **`spiderctl` CLI** for publishing, inspecting, syncing, and querying nodes.
 7. Create a **Podman containerized multi-node test environment** (`podman-compose.yml`) simulating MinIO storage, tracker, and 3+ worker nodes across simulated racks/zones.
 8. Execute **6 core validation experiments** proving origin bandwidth reduction, crash recovery, chunk corruption rejection, and deduplication.
 
@@ -38,8 +38,8 @@ artifact-mesh/
 │           ├── tracker.proto      # Tracker gRPC protocol definition
 │           └── peer.proto         # Peer gRPC chunk streaming protocol definition
 ├── cmd/
-│   ├── artifactctl/               # Publisher & node management CLI
-│   ├── artifactd/                 # Local node daemon process
+│   ├── spiderctl/               # Publisher & node management CLI
+│   ├── spiderd/                 # Local node daemon process
 │   └── tracker/                   # Central metadata tracker daemon
 ├── pkg/
 │   ├── chunk/                     # 4 MiB fixed chunker & SHA-256 calculator
@@ -69,19 +69,19 @@ artifact-mesh/
   - Supports arbitrary multi-file directory structures.
 
 ### 3.2 Content-Addressed Local Cache (`pkg/cache`)
-- Root directory: `/var/lib/artifactd/`
+- Root directory: `/var/lib/spider/`
 - Storage layout:
   ```text
-  /var/lib/artifactd/
+  /var/lib/spider/
     chunks/sha256/aa/aabbcc...
     tmp/sha256-...tmp
     manifests/sha256-abc.json
     artifacts/<name>/<version>/
   ```
 - **Atomic Persistence**:
-  1. Download chunk to `/var/lib/artifactd/tmp/<hash>.tmp`.
+  1. Download chunk to `/var/lib/spider/tmp/<hash>.tmp`.
   2. `fsync` the temp file, then compute SHA-256 of the **on-disk** bytes.
-  3. If hash matches expected hash, rename atomically (`os.Rename`) to `/var/lib/artifactd/chunks/sha256/xx/xxxx...`.
+  3. If hash matches expected hash, rename atomically (`os.Rename`) to `/var/lib/spider/chunks/sha256/xx/xxxx...`.
   4. If hash does NOT match, delete temporary file and return `ErrHashMismatch`.
 
 ### 3.3 Materializer (`pkg/materializer`)
@@ -111,7 +111,7 @@ type Source interface {
   - `ReportChunks(ReportChunksRequest) returns (ReportChunksResponse)`
   - `LocateChunks(LocateChunksRequest) returns (LocateChunksResponse)` (returns candidate nodes ordered by topology proximity).
 
-### 3.6 Node Daemon (`cmd/artifactd`, `pkg/engine`, `pkg/peer`)
+### 3.6 Node Daemon (`cmd/spiderd`, `pkg/engine`, `pkg/peer`)
 - **Peer Server**: gRPC `GetChunk(ChunkRequest) returns (stream ChunkDataResponse)`.
   - Streams 64 KiB chunks over gRPC connection until 4 MiB chunk transfer completes.
 - **Download Engine**:
@@ -123,7 +123,7 @@ type Source interface {
   6. Verify SHA-256, move to cache atomically, and notify Tracker via `ReportChunks`.
   7. Once all chunks are ready, invoke `Materializer` to instantiate local artifact folder and set status `READY`.
 
-### 3.7 Publisher & Admin CLI (`cmd/spiderctl`, `cmd/artifactctl`)
+### 3.7 Publisher & Admin CLI (`cmd/spiderctl`)
 - `spiderctl publish --source s3://bucket/gpt-x/v2 --name gpt-x --version 2.0`
 - `spiderctl sync --manifest manifest.json --dest /models/gpt-x/2.0`
 - `spiderctl inspect --manifest manifest.json`
@@ -131,7 +131,7 @@ type Source interface {
 - `spiderctl cache`
 - `spiderctl benchmark --size 100 --workers 6`
 - `spiderctl verify artifact --manifest manifest.json --dest /models/gpt-x/2.0`
-- `spiderctl verify cache --cache-dir /var/lib/artifactd`
+- `spiderctl verify cache --cache-dir /var/lib/spider`
 
 ### 3.8 Cryptographic Verification & Integrity Auditing (`pkg/verifier`)
 - **Per-Chunk SHA-256 Audit**: Re-verifies every chunk on disk against its hash name to detect bit-rot or silent data corruption.
@@ -183,7 +183,7 @@ services:
       context: .
       dockerfile: Containerfile
     container_name: worker-node-1
-    command: ["/app/artifactd", "--node-id=worker-1", "--rack=rack-1", "--zone=zone-a", "--tracker=tracker:50051", "--port=50052"]
+    command: ["/app/spiderd", "--node-id=worker-1", "--rack=rack-1", "--zone=zone-a", "--tracker=tracker:50051", "--port=50052"]
     environment:
       - MINIO_ENDPOINT=minio:9000
     networks:
@@ -197,7 +197,7 @@ services:
       context: .
       dockerfile: Containerfile
     container_name: worker-node-2
-    command: ["/app/artifactd", "--node-id=worker-2", "--rack=rack-1", "--zone=zone-a", "--tracker=tracker:50051", "--port=50052"]
+    command: ["/app/spiderd", "--node-id=worker-2", "--rack=rack-1", "--zone=zone-a", "--tracker=tracker:50051", "--port=50052"]
     environment:
       - MINIO_ENDPOINT=minio:9000
     networks:
@@ -211,7 +211,7 @@ services:
       context: .
       dockerfile: Containerfile
     container_name: worker-node-3
-    command: ["/app/artifactd", "--node-id=worker-3", "--rack=rack-2", "--zone=zone-b", "--tracker=tracker:50051", "--port=50052"]
+    command: ["/app/spiderd", "--node-id=worker-3", "--rack=rack-2", "--zone=zone-b", "--tracker=tracker:50051", "--port=50052"]
     environment:
       - MINIO_ENDPOINT=minio:9000
     networks:
@@ -247,7 +247,7 @@ The script `scripts/podman-poc-test.sh` executes the following benchmark test ba
 
 ### Experiment 5: Corrupt Chunk Rejection
 - Inject corrupt chunk data into a peer's stream response.
-- Verify `artifactd` SHA-256 verification fails, corrupt temporary chunk is deleted, peer is marked degraded, and clean chunk is re-fetched from origin.
+- Verify `spiderd` SHA-256 verification fails, corrupt temporary chunk is deleted, peer is marked degraded, and clean chunk is re-fetched from origin.
 
 ### Experiment 6: Version Deduplication
 - Publish Version 1.0 (1 GB) and Version 2.0 (1 GB, with 800 MB identical chunks and 200 MB modified chunks).
@@ -270,8 +270,8 @@ The script `scripts/podman-poc-test.sh` executes the following benchmark test ba
 - [ ] Define Protobuf contracts (`tracker.proto`, `peer.proto`).
 - [ ] Implement `pkg/tracker` & `cmd/tracker` (Central registration & location server).
 - [ ] Implement `pkg/peer` & `pkg/engine` (gRPC chunk streaming & concurrent scheduler).
-- [ ] Implement `cmd/artifactd` (Daemon runtime & HTTP/gRPC management API).
-- [ ] Implement `cmd/artifactctl` (CLI tool).
+- [ ] Implement `cmd/spiderd` (Daemon runtime & HTTP/gRPC management API).
+- [ ] Implement `cmd/spiderctl` (CLI tool).
 - [ ] Create `Containerfile` and `podman-compose.yml`.
 - [ ] Write `scripts/generate-test-data.sh` and `scripts/podman-poc-test.sh`.
 - [ ] Run Podman automated experiment battery and verify Phase 1 Success Criteria.

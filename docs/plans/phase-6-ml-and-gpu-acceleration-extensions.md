@@ -68,7 +68,7 @@ Manifests can optionally declare hardware compatibility requirements to prevent 
 }
 ```
 
-- **Placement Engine**: `artifactd` validates node hardware capabilities against artifact compatibility metadata before accepting sync request. Incompatible artifacts return explicit `ErrIncompatibleHardware` status.
+- **Placement Engine**: `spiderd` validates node hardware capabilities against artifact compatibility metadata before accepting sync request. Incompatible artifacts return explicit `ErrIncompatibleHardware` status.
 
 ---
 

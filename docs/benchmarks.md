@@ -75,7 +75,7 @@ Same-host loopback; no compose/Grafana. Useful for quick engine regression check
 
 ### Compose stack (`run-compose-benchmark`) — 500 MB × 3 workers
 
-Real `artifactd` nodes, central tracker (Redis + SQLite), Prometheus scrape.
+Real `spiderd` nodes, central tracker (Redis + SQLite), Prometheus scrape.
 
 | Metric | Direct origin | Spider P2P | Improvement |
 |---|---|---|---|

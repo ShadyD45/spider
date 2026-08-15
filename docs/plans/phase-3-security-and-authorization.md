@@ -27,7 +27,7 @@ All internal gRPC transport is encrypted and mutually authenticated:
 
 ```text
   +-------------------+                          +-------------------+
-  |   artifactd A     |    mTLS (gRPC Stream)    |   artifactd B     |
+  |   spiderd A     |    mTLS (gRPC Stream)    |   spiderd B     |
   |  (Client Cert A)  | <----------------------> |  (Server Cert B)  |
   +-------------------+                          +-------------------+
             \                                              /
@@ -63,8 +63,8 @@ To prevent arbitrary code execution or tampered artifact injection:
 }
 ```
 
-- **Publish Verification**: `artifactctl publish` signs canonical manifest payload with publisher's private key.
-- **Sync Verification**: `artifactd` validates the signature against trusted public keys before accepting manifest and queuing chunk downloads. Unsigned or invalid manifests are rejected immediately.
+- **Publish Verification**: `spiderctl publish` signs canonical manifest payload with publisher's private key.
+- **Sync Verification**: `spiderd` validates the signature against trusted public keys before accepting manifest and queuing chunk downloads. Unsigned or invalid manifests are rejected immediately.
 
 ---
 
@@ -101,8 +101,8 @@ To prevent malicious manifests from overwriting host files (e.g. `../../../../et
 ## 3. Implementation Checklist
 
 - [ ] Implement `pkg/security/tls` helper for loading CA, client certificates, and server certificates.
-- [ ] Add CLI flags to `artifactd`, `tracker`, and `artifactctl` for `--tls-ca`, `--tls-cert`, and `--tls-key`.
-- [ ] Implement Ed25519 manifest signature generation in `cmd/artifactctl publish`.
+- [ ] Add CLI flags to `spiderd`, `tracker`, and `spiderctl` for `--tls-ca`, `--tls-cert`, and `--tls-key`.
+- [ ] Implement Ed25519 manifest signature generation in `cmd/spiderctl publish`.
 - [ ] Implement signature validation module in `pkg/manifest`.
 - [x] Path-join escape guard in `pkg/materializer` (Phase 2). Symlink policy remains Phase 3.
 - [ ] Add security unit tests verifying rejection of path-traversal manifests and untrusted TLS clients.

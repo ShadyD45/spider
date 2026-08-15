@@ -80,7 +80,7 @@ parallel_sync() {
     local log="/tmp/spider-compose-bench-${w}-$(basename "$dest").log"
     logs+=("$log")
     (
-      args=(artifactctl sync --manifest=/data/bench/manifest.json --dest="$dest" --daemon=127.0.0.1:50052)
+      args=(spiderctl sync --manifest=/data/bench/manifest.json --dest="$dest" --daemon=127.0.0.1:50052)
       if [[ -n "$origin" ]]; then args+=(--origin="$origin"); fi
       "${COMPOSE[@]}" exec -T "$w" "${args[@]}" >"$log" 2>&1
     ) &
@@ -141,7 +141,7 @@ reset_workers
 
 echo ""
 echo "=== Scenario 2: P2P mesh (seed on worker-1, fan-out to fleet) ==="
-"${COMPOSE[@]}" exec -T worker-1 artifactctl publish \
+"${COMPOSE[@]}" exec -T worker-1 spiderctl publish \
   --source=/bench/origin \
   --name=bench-model \
   --version=1.0 \

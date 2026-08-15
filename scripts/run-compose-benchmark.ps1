@@ -100,7 +100,7 @@ function Reset-Workers {
 function Write-Manifest {
     Write-Host "--- publish manifest -> tmp/bench/manifest.json (worker-1) ---"
     Invoke-Compose @(
-        "exec", "-T", "worker-1", "artifactctl", "publish",
+        "exec", "-T", "worker-1", "spiderctl", "publish",
         "--source=/bench/origin",
         "--name=bench-model",
         "--version=1.0",
@@ -134,7 +134,7 @@ function Invoke-ParallelSync {
             param($root, $exe, $baseArgs, $worker, $dest, $origin, $logPath)
             Set-Location $root
             $cmd = [string[]]@($baseArgs + @(
-                "exec", "-T", $worker, "artifactctl", "sync",
+                "exec", "-T", $worker, "spiderctl", "sync",
                 "--manifest=/data/bench/manifest.json",
                 "--dest=$dest",
                 "--daemon=127.0.0.1:50052"
@@ -196,7 +196,7 @@ Reset-Workers
 
 Write-Host "`n=== Scenario 2: P2P mesh (seed on worker-1, fan-out to fleet) ==="
 Invoke-Compose @(
-    "exec", "-T", "worker-1", "artifactctl", "publish",
+    "exec", "-T", "worker-1", "spiderctl", "publish",
     "--source=/bench/origin",
     "--name=bench-model",
     "--version=1.0",

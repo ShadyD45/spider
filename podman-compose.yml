@@ -79,7 +79,7 @@ services:
   worker-1:
     <<: *spider
     container_name: worker-node-1
-    command: ["artifactd", "--node-id=worker-1", "--advertise-addr=worker-1:50052", "--port=50052", "--http-addr=:9090", "--tracker=central-tracker:50051", "--rack=rack-1", "--zone=zone-a"]
+    command: ["spiderd", "--node-id=worker-1", "--advertise-addr=worker-1:50052", "--port=50052", "--http-addr=:9090", "--tracker=central-tracker:50051", "--rack=rack-1", "--zone=zone-a"]
     environment:
       - MINIO_ENDPOINT=http://minio:9000
       - MINIO_ROOT_USER=minioadmin
@@ -99,7 +99,7 @@ services:
   worker-2:
     <<: *spider
     container_name: worker-node-2
-    command: ["artifactd", "--node-id=worker-2", "--advertise-addr=worker-2:50052", "--port=50052", "--http-addr=:9090", "--tracker=central-tracker:50051", "--rack=rack-1", "--zone=zone-a"]
+    command: ["spiderd", "--node-id=worker-2", "--advertise-addr=worker-2:50052", "--port=50052", "--http-addr=:9090", "--tracker=central-tracker:50051", "--rack=rack-1", "--zone=zone-a"]
     environment:
       - MINIO_ENDPOINT=http://minio:9000
       - MINIO_ROOT_USER=minioadmin
@@ -119,7 +119,7 @@ services:
   worker-3:
     <<: *spider
     container_name: worker-node-3
-    command: ["artifactd", "--node-id=worker-3", "--advertise-addr=worker-3:50052", "--port=50052", "--http-addr=:9090", "--tracker=central-tracker:50051", "--rack=rack-2", "--zone=zone-b"]
+    command: ["spiderd", "--node-id=worker-3", "--advertise-addr=worker-3:50052", "--port=50052", "--http-addr=:9090", "--tracker=central-tracker:50051", "--rack=rack-2", "--zone=zone-b"]
     environment:
       - MINIO_ENDPOINT=http://minio:9000
       - MINIO_ROOT_USER=minioadmin

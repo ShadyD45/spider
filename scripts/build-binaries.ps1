@@ -20,8 +20,6 @@ Write-Host "--- Go build (linux/$env:GOARCH) -> dist/linux ---"
 Build-One tracker ./cmd/tracker
 Build-One spiderd ./cmd/spiderd
 Build-One spiderctl ./cmd/spiderctl
-Copy-Item -Force (Join-Path $Out spiderd) (Join-Path $Out artifactd)
-Copy-Item -Force (Join-Path $Out spiderctl) (Join-Path $Out artifactctl)
 
 Write-Host "Done: $Out"
 

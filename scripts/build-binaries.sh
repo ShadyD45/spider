@@ -26,7 +26,5 @@ echo "--- Go build (linux/${GOARCH}) -> dist/linux ---"
 build_one tracker ./cmd/tracker
 build_one spiderd ./cmd/spiderd
 build_one spiderctl ./cmd/spiderctl
-cp -f "${OUT}/spiderd" "${OUT}/artifactd"
-cp -f "${OUT}/spiderctl" "${OUT}/artifactctl"
 
 echo "Done: ${OUT}"

@@ -12,9 +12,9 @@ Phase 4 embeds the Artifact Mesh into Kubernetes environments as a first-class d
 
 ### Key Objectives
 1. **Custom Resource Definition (`ArtifactDeployment`)**: Define CRD schema `artifact.fabric/v1alpha1` representing desired artifact placement across cluster nodes.
-2. **Kubernetes Controller (`cmd/controller`)**: Build a `controller-runtime` operator that watches `ArtifactDeployment` CRDs, evaluates node selectors/topology, and instructs `artifactd` daemons via gRPC/REST.
-3. **`artifactd` DaemonSet Manifests**: Helm charts and Kustomize manifests deploying `artifactd` on cluster nodes with hostPath persistent storage (`/var/lib/artifactd`).
-4. **Node Topology Mapping**: Automatically map Kubernetes node labels (`topology.kubernetes.io/zone`, `topology.kubernetes.io/region`, `kubernetes.io/hostname`) into `artifactd` topology registration.
+2. **Kubernetes Controller (`cmd/controller`)**: Build a `controller-runtime` operator that watches `ArtifactDeployment` CRDs, evaluates node selectors/topology, and instructs `spiderd` daemons via gRPC/REST.
+3. **`spiderd` DaemonSet Manifests**: Helm charts and Kustomize manifests deploying `spiderd` on cluster nodes with hostPath persistent storage (`/var/lib/spider`).
+4. **Node Topology Mapping**: Automatically map Kubernetes node labels (`topology.kubernetes.io/zone`, `topology.kubernetes.io/region`, `kubernetes.io/hostname`) into `spiderd` topology registration.
 5. **CRD Status Subresource**: Expose real-time distribution progress (desired vs ready nodes, bytes transferred, distribution latency) on the CRD object.
 
 ---
@@ -121,44 +121,44 @@ spec:
   |                                                   |
   |  1. Reconcile CRD Spec                            |
   |  2. Resolve Node Placement (nodeSelector)         |
-  |  3. Dispatch desired state to target artifactd    |
+  |  3. Dispatch desired state to target spiderd      |
   |  4. Poll status & update CRD Status subresource   |
   +---------------------------------------------------+
             |
             v  (gRPC Control Calls)
   +---------------------------------------------------+
-  |               artifactd DaemonSet                 |
+  |               spiderd DaemonSet                   |
   |  [Node 1]          [Node 2]          [Node 3]     |
   +---------------------------------------------------+
 ```
 
 - **Reconciliation Rules**:
   - Controller identifies nodes matching `.spec.placement.nodeSelector`.
-  - For each target node, controller issues a `SyncArtifact` command to the node's local `artifactd` daemon.
+  - For each target node, controller issues a `SyncArtifact` command to the node's local `spiderd` daemon.
   - Controller tracks sync progress and updates `.status.nodesReady` until `minReadyPercent` threshold is met.
 
 ---
 
-### 2.3 `artifactd` DaemonSet Deployment (`deploy/kubernetes/daemonset.yaml`)
+### 2.3 `spiderd` DaemonSet Deployment (`deploy/kubernetes/daemonset.yaml`)
 
 ```yaml
 apiVersion: apps/v1
 kind: DaemonSet
 metadata:
-  name: artifactd
+  name: spiderd
   namespace: artifact-system
 spec:
   selector:
     matchLabels:
-      app: artifactd
+      app: spiderd
   template:
     metadata:
       labels:
-        app: artifactd
+        app: spiderd
     spec:
       containers:
-        - name: artifactd
-          image: artifact-fabric/artifactd:latest
+        - name: spiderd
+          image: spider/spiderd:latest
           env:
             - name: NODE_NAME
               valueFrom:
@@ -171,12 +171,12 @@ spec:
             - name: TRACKER_SERVICE
               value: "tracker.artifact-system.svc.cluster.local:50051"
           volumeMounts:
-            - mountPath: /var/lib/artifactd
+            - mountPath: /var/lib/spider
               name: storage-volume
       volumes:
         - name: storage-volume
           hostPath:
-            path: /var/lib/artifactd
+            path: /var/lib/spider
             type: DirectoryOrCreate
 ```
 
@@ -190,5 +190,5 @@ spec:
 - [ ] Write reconciliation loop targeting matching node daemons.
 - [ ] Map Kubernetes node topology labels (`topology.kubernetes.io/zone`, `rack`) into daemon registration.
 - [ ] Write CRD status updater updating `nodesReady`, `bytesAvailable`, and `Ready` conditions.
-- [ ] Provide Helm chart (`deploy/helm/artifact-mesh/`) packaging Tracker, Controller, and `artifactd` DaemonSet.
+- [ ] Provide Helm chart (`deploy/helm/artifact-mesh/`) packaging Tracker, Controller, and `spiderd` DaemonSet.
 - [ ] Add local KinD / Minikube integration test script.

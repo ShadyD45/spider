@@ -20,13 +20,13 @@ graph TD
 * **Tech Stack**: Go 1.22+, gRPC / Protocol Buffers, AWS SDK v2 / MinIO Go SDK, Podman & Podman Compose.
 * **Deliverables**:
   1. `pkg/chunk`: Fixed 4 MiB chunker with SHA-256 content addressing.
-  2. `pkg/cache`: Disk-backed content-addressed store (`/var/lib/artifactd/chunks/...`) with atomic writes (`tmp` -> rename).
+  2. `pkg/cache`: Disk-backed content-addressed store (`/var/lib/spider/chunks/...`) with atomic writes (`tmp` -> rename).
   3. `pkg/materializer`: Reconstructs original physical directory tree/files from verified chunk cache (re-hashes each chunk while copying).
   4. `pkg/source`: Extensible storage adapter interface with Local Filesystem and S3/MinIO drivers.
   5. `pkg/verifier`: Offline SHA-256 audit of cache shards and materialized directories (`spiderctl verify`).
   6. `cmd/tracker`: Centralized gRPC service for peer heartbeats, chunk locations, and topology ranking.
-  7. `cmd/artifactd`: Node daemon handling local REST/gRPC API, P2P gRPC streaming transfers (`GetChunk`), transfer scheduling, and crash resume.
-  8. `cmd/artifactctl` / `cmd/spiderctl`: Publisher and management CLI (`publish`, `inspect`, `sync`, `status`, `peers`, `cache`, `verify`).
+  7. `cmd/spiderd`: Node daemon handling local REST/gRPC API, P2P gRPC streaming transfers (`GetChunk`), transfer scheduling, and crash resume.
+  8. `cmd/spiderctl`: Publisher and management CLI (`publish`, `inspect`, `sync`, `status`, `peers`, `cache`, `verify`).
   9. `deploy/podman`: Podman Compose configuration and setup scripts simulating MinIO seed storage, central tracker, and 3+ worker nodes across simulated racks/zones.
 
 ### **Phase 2: Framework Hardening & Core Reliability** *(Current Focus)*
@@ -45,7 +45,7 @@ graph TD
 ### **Phase 4: Kubernetes Integration & Operator**
 * `ArtifactDeployment` CRD specification and Status subresource updates.
 * Kubernetes Controller / Operator (`cmd/controller`) implementing reconciliation loop.
-* `artifactd` DaemonSet manifests and Helm chart with Kubernetes node topology affinity (`topology.kubernetes.io/zone`).
+* `spiderd` DaemonSet manifests and Helm chart with Kubernetes node topology affinity (`topology.kubernetes.io/zone`).
 
 ### **Phase 5: Multi-Region Scale & Advanced Transports**
 * Hierarchical control plane (Global Registry + Regional Trackers) for cross-datacenter scale.
@@ -76,8 +76,8 @@ artifact-mesh/
 │           ├── tracker.proto      # Central tracker gRPC protocol
 │           └── peer.proto         # Daemon-to-daemon chunk streaming protocol
 ├── cmd/
-│   ├── artifactctl/               # Publisher & operator CLI
-│   ├── artifactd/                 # Local node daemon
+│   ├── spiderctl/               # Publisher & operator CLI
+│   ├── spiderd/                 # Local node daemon
 │   └── tracker/                   # Central tracker service
 ├── pkg/
 │   ├── chunk/                     # Chunker & hash calculator
@@ -163,7 +163,7 @@ The PoC environment will be managed using **Podman** containers on a custom netw
 2. **Experiment 2 (P2P Mesh Download)**: Worker 1 syncs from MinIO; Workers 2 & 3 sync from Worker 1 and MinIO concurrently. Verify `origin_bytes_saved >= 60%`.
 3. **Experiment 3 (Peer Failure Resilience)**: Kill Worker 1 midway through Worker 2's sync; verify Worker 2 seamlessly falls back to MinIO or other available peers without failure.
 4. **Experiment 4 (Crash & Resume)**: Abort Worker 2 at 50% download; restart daemon; verify resume without re-downloading previously verified chunks.
-5. **Experiment 5 (Chunk Integrity Verification)**: Inject corrupted byte into a peer's chunk stream; verify receiving `artifactd` rejects chunk, logs error, and refetches from standard origin/peer.
+5. **Experiment 5 (Chunk Integrity Verification)**: Inject corrupted byte into a peer's chunk stream; verify receiving `spiderd` rejects chunk, logs error, and refetches from standard origin/peer.
 6. **Experiment 6 (Deduplication across Versions)**: Publish Artifact v1 and Artifact v2 (80% identical chunks); verify Worker 3 only transfers 20% new chunks for v2.
 
 ---
@@ -199,4 +199,4 @@ The PoC environment will be managed using **Podman** containers on a custom netw
 
 ### Manual Verification
 - CLI test using `spiderctl publish` -> `spiderctl sync` -> `spiderctl verify artifact` -> `spiderctl status` across Podman containers.
-- Cache bit-rot audit: `spiderctl verify cache --cache-dir /var/lib/artifactd`.
+- Cache bit-rot audit: `spiderctl verify cache --cache-dir /var/lib/spider`.

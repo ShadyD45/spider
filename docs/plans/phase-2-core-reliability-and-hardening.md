@@ -2,7 +2,7 @@
 
 **Document Status:** Approved Specification  
 **Phase:** 2 of 6  
-**Product name:** Spider (aliases `artifactd` / `artifactctl` remain)  
+**Product name:** Spider  
 **Focus:** Pluggable Store/Cache, compact seed advertisements, swarm scheduler, refcounted disk eviction, YAML config, Prometheus/health
 
 ---

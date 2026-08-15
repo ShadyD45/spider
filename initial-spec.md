@@ -286,7 +286,7 @@ The artifact engine must remain independent.
                 +---------+    +---------+    +---------+
                 | Node A  |<-->| Node B  |<-->| Node C  |
                 |---------|    |---------|    |---------|
-                |artifactd|    |artifactd|    |artifactd|
+                |spiderd|    |spiderd|    |spiderd|
                 | cache   |    | cache   |    | cache   |
                 +----+----+    +----+----+    +----+----+
                      |              |              |
@@ -325,7 +325,7 @@ Kubernetes is optional for the core engine, but the reference deployment should 
        v              v              v
    GPU Node A     GPU Node B     GPU Node C
    +---------+    +---------+    +---------+
-   |artifactd|    |artifactd|    |artifactd|
+   |spiderd|    |spiderd|    |spiderd|
    +---------+    +---------+    +---------+
 ```
 
@@ -353,7 +353,7 @@ Use Kubernetes rather than reimplementing:
 
 * CRD schema
 * Kubernetes controller/operator
-* `artifactd` DaemonSet
+* `spiderd` DaemonSet
 * status reporting
 * artifact-specific reconciliation logic
 
@@ -483,12 +483,12 @@ For the PoC, fixed-size chunks are strongly preferred because they simplify impl
 
 # 10. Content-Addressed Local Cache
 
-Each `artifactd` maintains a local cache.
+Each `spiderd` maintains a local cache.
 
 Conceptually:
 
 ```text
-/var/lib/artifactd/
+/var/lib/spider/
 
   chunks/
     sha256/
@@ -573,10 +573,10 @@ It must NOT proxy chunk bytes.
 
 ## Registration
 
-When `artifactd` receives a verified chunk:
+When `spiderd` receives a verified chunk:
 
 ```text
-artifactd -> tracker
+spiderd -> tracker
 
 chunk:
   sha256:abc...
@@ -681,7 +681,7 @@ Possible future transports:
 User runs:
 
 ```bash
-artifactctl publish \
+spiderctl publish \
   --source s3://bucket/gpt-x/v2 \
   --name gpt-x \
   --version 2.0
@@ -708,7 +708,7 @@ Worker wants:
 gpt-x@2.0
 ```
 
-`artifactd`:
+`spiderd`:
 
 1. Gets desired artifact.
 2. Fetches manifest.
@@ -933,7 +933,7 @@ Pinned artifacts must not be evicted.
 The system should support:
 
 ```bash
-artifactctl prefetch gpt-x@2.0 --selector gpu=h100
+spiderctl prefetch gpt-x@2.0 --selector gpu=h100
 ```
 
 This means:
@@ -1016,7 +1016,7 @@ The controller should:
 2. Validate the requested artifact.
 3. Resolve placement selectors.
 4. Determine desired nodes.
-5. Monitor `artifactd` status.
+5. Monitor `spiderd` status.
 6. Update CRD status.
 7. Trigger/reconcile retries.
 8. Handle node additions/removals.
@@ -1032,14 +1032,14 @@ The controller should NOT:
 
 ---
 
-# 27. `artifactd` Responsibilities
+# 27. `spiderd` Responsibilities
 
-`artifactd` is the core node agent.
+`spiderd` is the core node agent.
 
 Modules:
 
 ```text
-artifactd
+spiderd
 |
 +-- Reconciler
 +-- Manifest Manager
@@ -1062,15 +1062,15 @@ artifactd
 CLI:
 
 ```bash
-artifactctl publish
-artifactctl inspect
-artifactctl fetch
-artifactctl sync
-artifactctl status
-artifactctl peers
-artifactctl cache
-artifactctl prefetch
-artifactctl delete
+spiderctl publish
+spiderctl inspect
+spiderctl fetch
+spiderctl sync
+spiderctl status
+spiderctl peers
+spiderctl cache
+spiderctl prefetch
+spiderctl delete
 ```
 
 Core API conceptually:
@@ -1093,7 +1093,7 @@ evict(artifactID) -> Result
 
 # 29. Local Agent API
 
-`artifactd` should expose a local API for applications.
+`spiderd` should expose a local API for applications.
 
 Example:
 
@@ -1578,7 +1578,7 @@ with:
 MinIO
 Tracker
 Artifact Registry
-3-10 artifactd workers
+3-10 spiderd workers
 ```
 
 Use a large synthetic artifact.
@@ -1855,7 +1855,7 @@ Recommended:
 
 Use Go for:
 
-* `artifactd`
+* `spiderd`
 * tracker
 * controller
 * CLI
@@ -1880,8 +1880,8 @@ Potential future high-performance transport libraries can be implemented in Rust
 artifact-fabric/
 |
 +-- cmd/
-|   +-- artifactd/
-|   +-- artifactctl/
+|   +-- spiderd/
+|   +-- spiderctl/
 |   +-- tracker/
 |   +-- controller/
 |
@@ -2039,7 +2039,7 @@ Never advertise `DOWNLOADING` chunks as available.
 # 56. Important Sequence Diagram
 
 ```text
-Controller        artifactd A       Tracker       artifactd B       S3
+Controller        spiderd A       Tracker       spiderd B       S3
     |                  |               |               |             |
     | desired v2       |               |               |             |
     |----------------->|               |               |             |
@@ -2103,7 +2103,7 @@ Production targets should eventually be defined around:
 ### Availability
 
 ```text
-artifactd availability
+spiderd availability
 tracker availability
 controller availability
 ```
@@ -2263,7 +2263,7 @@ Kubernetes
 The core framework remains:
 
 ```text
-artifactd
+spiderd
 tracker
 registry
 transfer engine

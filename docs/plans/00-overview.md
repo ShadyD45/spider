@@ -2,7 +2,7 @@
 
 **Version:** 1.2  
 **Status:** Phase 1 complete; Phase 2 largely implemented — **project still early / not production-ready**  
-**Product name:** **Spider** (`artifactd` / `artifactctl` are aliases)
+**Product name:** **Spider**
 
 This document is the master index for phase plans in `docs/plans/`.
 
