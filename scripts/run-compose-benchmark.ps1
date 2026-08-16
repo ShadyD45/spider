@@ -10,6 +10,10 @@ $ErrorActionPreference = "Stop"
 $Root = Split-Path $PSScriptRoot -Parent
 Set-Location $Root
 
+. (Join-Path $PSScriptRoot "windows-podman.ps1")
+Initialize-SpiderPodmanEnv
+$Compose = Get-SpiderComposeCommand
+
 Remove-Item Env:GOOS, Env:GOARCH, Env:CGO_ENABLED, Env:GOFLAGS -ErrorAction SilentlyContinue
 
 $Workers = @("worker-1", "worker-2", "worker-3")
@@ -18,22 +22,9 @@ $WantBytes = [int64]$SizeMB * 1024 * 1024
 $OriginDir = Split-Path $File -Parent
 if (-not $OriginDir) { $OriginDir = "." }
 
-if (Get-Command podman-compose -ErrorAction SilentlyContinue) {
-    $Compose = @("podman-compose", "-f", "podman-compose.yml")
-} elseif (Get-Command docker -ErrorAction SilentlyContinue) {
-    $Compose = @("docker", "compose", "-f", "docker-compose.yml")
-} else {
-    throw "podman-compose or docker compose required"
-}
-
 function Invoke-Compose {
     param([string[]]$CmdArgs)
-    $all = @($Compose + $CmdArgs)
-    $prev = $ErrorActionPreference
-    $ErrorActionPreference = "Continue"
-    & $all[0] @($all[1..($all.Length - 1)]) 2>&1 | ForEach-Object { Write-Host $_ }
-    $ErrorActionPreference = $prev
-    if ($LASTEXITCODE -ne 0) { throw "compose failed: $CmdArgs" }
+    Invoke-SpiderCompose -Compose $Compose -CmdArgs $CmdArgs
 }
 
 function Ensure-Payload {
@@ -236,5 +227,5 @@ Write-Host ("Prometheus totals (delta this run): origin_downloaded={0} peer_tran
 Write-Host ""
 Write-Host "Grafana:    http://localhost:3000/d/spider/spider-mesh  (admin / admin)"
 Write-Host "Prometheus: http://localhost:9090"
-Write-Host "Stack left running - do not compose down until you have screenshots."
+Write-Host "Stack left running. Teardown: .\scripts\teardown-compose.ps1"
 Write-Host "================================================================="
