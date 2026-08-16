@@ -19,6 +19,8 @@ Live stack (left running after `run-compose-benchmark`):
 
 On **Podman Desktop for Windows**, `localhost` often does not forward container ports. Use the Podman VM IP instead, e.g. `http://172.19.x.x:3000/d/spider/spider-mesh` (run `wsl -d podman-machine-default -- ip -4 -o addr show eth0 scope global` to find the current address).
 
+A screenshot from the 2026-08-16 same-host compose run is in [Compose stack](#compose-stack-run-compose-benchmark--500-mb--3-workers) below. Grafana is still worth capturing on one machine: it shows the dashboard wiring, origin-vs-peer mix, and integrity counters. It is **not** evidence of multi-host wall-clock speedup.
+
 ---
 
 ## Two benchmark modes
@@ -92,6 +94,10 @@ Real `spiderd` nodes, central tracker (Redis + SQLite), Prometheus scrape.
 Prometheus delta (this run): `origin_downloaded=0`, `peer_transferred=67108864` (64 MiB).
 
 Baseline origin bytes (692 MB vs theoretical 1500 MB) reflect sync-log totals after worker cache resets; some workers may report partial reuse across scenario setup. Mesh still shows **zero** origin bytes. Reported peer bytes are lower than 2×500 MB theoretical — treat Prometheus/script totals as the recorded figure, not a full 1.5 GB fan-out accounting.
+
+![Grafana spider-mesh dashboard after the same-host compose benchmark](compose-grafana-same-host.png)
+
+*Same-host Podman compose (3 `spiderd` workers + tracker on one laptop), dashboard `spider-mesh`, last 15 minutes. Transfer-mix bursts, tracker cache hits, and 0 SHA-256 failures are expected on this testbed. Chunk cache (~1.57 GiB) and origin-bytes-saved panels reflect container metrics on one machine — not a multi-AZ fleet.*
 
 ---
 
