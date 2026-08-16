@@ -87,7 +87,9 @@ Default materialization is **copy**; hardlink is optional when cache and dest sh
 6. **Pluggable Store / Cache / Source** — drivers selected by config
 7. **Local Testing Engine** — Podman Compose; see [docs/benchmarks.md](../benchmarks.md) for interpretation caveats (same-host runs measure origin savings, not production wall-clock).
 
-**Benchmarks (2026-08-15):** Compose 500 MB × 3 workers — 100% origin bytes saved, ~0.96× wall clock on one machine. Multi-host fleet benchmark pending.
+**Phase 2.5 (in progress):** Node-wide upload bandwidth (`golang.org/x/time/rate`), EWMA throughput scheduling, stale peer reconciliation, retryable chunk advertisement, expanded Prometheus metrics, gRPC connection lifecycle. Multi-host fleet benchmark pending.
+
+**Benchmarks (2026-08-16):** In-process loopback 500 MB × 6 workers — 100% origin bytes saved. Compose fleet *(2026-08-15)* — 100% origin saved, ~0.96× wall clock on one machine.
 
 ---
 

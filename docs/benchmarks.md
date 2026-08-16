@@ -100,6 +100,21 @@ Spider’s main value on a real fleet is **reducing traffic to origin storage** 
 
 Wall-clock duration can be **equal to or slower than** direct origin on a single host. That does **not** mean P2P failed if origin bytes dropped.
 
+### Metric semantics (Phase 2.5)
+
+| Prometheus metric | Meaning |
+|---|---|
+| `spider_origin_bytes_downloaded_total` | Bytes read from origin storage |
+| `spider_peer_bytes_transferred_total` | Bytes received from peers (download side) |
+| `spider_peer_bytes_uploaded_total` | Bytes sent to peers from this node |
+| `spider_peer_bytes_downloaded_total` | Bytes received from peers on this node |
+| `spider_cache_bytes_reused_total` | Bytes of chunks already in local cache at sync start |
+| `spider_origin_bytes_avoided_total` | Peer bytes + cache reuse (primary savings metric) |
+| `spider_swarm_unique_sources` | Distinct peer sources seen during active sync |
+| `spider_swarm_amplification_ratio` | Peer bytes / origin bytes for last completed sync |
+
+Swarm amplification (`rate(peer_bytes) / rate(origin_bytes)`) measures distribution traffic created per origin byte — not the same as total bandwidth savings.
+
 ### Recorded results summary (2026-08-16)
 
 | Benchmark | Workers | Origin (baseline) | Origin (P2P) | Peer (P2P) | Wall clock (baseline → P2P) |

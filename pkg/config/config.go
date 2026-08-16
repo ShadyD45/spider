@@ -27,6 +27,7 @@ type Config struct {
 	Download      DownloadConfig      `yaml:"download"`
 	Origin        OriginConfig        `yaml:"origin"`
 	Upload        UploadConfig        `yaml:"upload"`
+	PeerClient    PeerClientConfig    `yaml:"peerClient"`
 	Retry         RetryConfig         `yaml:"retry"`
 }
 
@@ -80,8 +81,10 @@ type NodeConfig struct {
 }
 
 type AdvertisementConfig struct {
-	BatchSize int           `yaml:"batchSize"`
-	Interval  time.Duration `yaml:"interval"`
+	BatchSize    int           `yaml:"batchSize"`
+	Interval     time.Duration `yaml:"interval"`
+	MaxRetries   int           `yaml:"maxRetries"`
+	RetryBackoff time.Duration `yaml:"retryBackoff"`
 }
 
 type PeerDiscoveryConfig struct {
@@ -100,6 +103,11 @@ type UploadConfig struct {
 	MaxConcurrency   int `yaml:"maxConcurrency"`
 	MaxBandwidthMbps int `yaml:"maxBandwidthMbps"`
 	MaxQueueSize     int `yaml:"maxQueueSize"`
+}
+
+type PeerClientConfig struct {
+	MaxConnections int           `yaml:"maxConnections"`
+	IdleTimeout    time.Duration `yaml:"idleTimeout"`
 }
 
 type RetryConfig struct {
@@ -126,6 +134,7 @@ type fileConfig struct {
 	Download      *DownloadConfig      `yaml:"download"`
 	Origin        *OriginConfig        `yaml:"origin"`
 	Upload        *UploadConfig        `yaml:"upload"`
+	PeerClient    *PeerClientConfig    `yaml:"peerClient"`
 	Retry         *RetryConfig         `yaml:"retry"`
 }
 
@@ -159,11 +168,12 @@ func Defaults() Config {
 			Zone:        "zone-a",
 			Rack:        "rack-1",
 		},
-		Advertisement: AdvertisementConfig{BatchSize: 16, Interval: 100 * time.Millisecond},
+		Advertisement: AdvertisementConfig{BatchSize: 16, Interval: 100 * time.Millisecond, MaxRetries: 5, RetryBackoff: 100 * time.Millisecond},
 		PeerDiscovery: PeerDiscoveryConfig{RefreshInterval: 500 * time.Millisecond},
 		Download:      DownloadConfig{MaxConcurrency: 8},
 		Origin:        OriginConfig{MaxConcurrency: 4},
 		Upload:        UploadConfig{MaxConcurrency: 16, MaxQueueSize: 100},
+		PeerClient:    PeerClientConfig{MaxConnections: 64, IdleTimeout: 2 * time.Minute},
 		Retry: RetryConfig{
 			MaxAttempts: 3,
 			Backoff:     BackoffConfig{Initial: 100 * time.Millisecond, Max: 2 * time.Second},
@@ -239,6 +249,18 @@ func (c *Config) applyZeroDefaults() {
 	}
 	if c.Advertisement.Interval <= 0 {
 		c.Advertisement.Interval = 100 * time.Millisecond
+	}
+	if c.Advertisement.MaxRetries <= 0 {
+		c.Advertisement.MaxRetries = 5
+	}
+	if c.Advertisement.RetryBackoff <= 0 {
+		c.Advertisement.RetryBackoff = 100 * time.Millisecond
+	}
+	if c.PeerClient.MaxConnections <= 0 {
+		c.PeerClient.MaxConnections = 64
+	}
+	if c.PeerClient.IdleTimeout <= 0 {
+		c.PeerClient.IdleTimeout = 2 * time.Minute
 	}
 	if c.PeerDiscovery.RefreshInterval <= 0 {
 		c.PeerDiscovery.RefreshInterval = 500 * time.Millisecond

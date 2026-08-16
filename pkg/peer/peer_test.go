@@ -199,3 +199,124 @@ func TestDownloadResumeFromOffset(t *testing.T) {
 		t.Fatal("resumed chunk missing")
 	}
 }
+
+func startTestServer(t *testing.T, srv *Server) (addr string, stop func()) {
+	t.Helper()
+	lis, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	grpcServer := grpc.NewServer()
+	proto.RegisterPeerServiceServer(grpcServer, srv)
+	go func() { _ = grpcServer.Serve(lis) }()
+	return fmt.Sprintf("127.0.0.1:%d", lis.Addr().(*net.TCPAddr).Port), func() { grpcServer.Stop() }
+}
+
+func TestSharedUploadBandwidthLimit(t *testing.T) {
+	tempDir := t.TempDir()
+	c, err := cache.NewChunkStore(tempDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 1 MiB chunk
+	chunkData := bytes.Repeat([]byte("x"), 1024*1024)
+	chunkHash := chunk.ComputeHash(chunkData)
+	if err := c.PutChunk(chunkHash, chunkData); err != nil {
+		t.Fatal(err)
+	}
+
+	addr, stop := startTestServer(t, NewServerWithLimits("n", c, nil, UploadLimits{
+		MaxConcurrency:   4,
+		MaxBandwidthMbps: 1, // ~125 KB/s
+	}))
+	defer stop()
+
+	pool := NewClientPool()
+	defer pool.Close()
+	ctx := context.Background()
+
+	start := time.Now()
+	if _, err := pool.DownloadChunk(ctx, addr, chunkHash); err != nil {
+		t.Fatal(err)
+	}
+	elapsed := time.Since(start)
+	// 1 MiB = 8 Mbit; at 1 Mbps minimum ~8s (allow margin for test overhead)
+	if elapsed < 6*time.Second {
+		t.Fatalf("single upload too fast with 1 Mbps cap: %v", elapsed)
+	}
+}
+
+func TestConcurrentUploadsShareBandwidth(t *testing.T) {
+	tempDir := t.TempDir()
+	c, err := cache.NewChunkStore(tempDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	chunkData := bytes.Repeat([]byte("y"), 512*1024) // 512 KiB each
+	chunkHash := chunk.ComputeHash(chunkData)
+	if err := c.PutChunk(chunkHash, chunkData); err != nil {
+		t.Fatal(err)
+	}
+
+	addr, stop := startTestServer(t, NewServerWithLimits("n", c, nil, UploadLimits{
+		MaxConcurrency:   4,
+		MaxBandwidthMbps: 1,
+	}))
+	defer stop()
+
+	pool := NewClientPool()
+	defer pool.Close()
+	ctx := context.Background()
+
+	const workers = 2
+	start := time.Now()
+	done := make(chan struct{}, workers)
+	for i := 0; i < workers; i++ {
+		go func() {
+			_, err := pool.DownloadChunk(ctx, addr, chunkHash)
+			if err != nil {
+				t.Error(err)
+			}
+			done <- struct{}{}
+		}()
+	}
+	for i := 0; i < workers; i++ {
+		<-done
+	}
+	elapsed := time.Since(start)
+	// 2 x 512 KiB = 8 Mbit total; shared 1 Mbps ~8s minimum
+	if elapsed < 6*time.Second {
+		t.Fatalf("concurrent uploads finished too fast for shared 1 Mbps: %v", elapsed)
+	}
+}
+
+func TestClientPoolEvictsIdleConnections(t *testing.T) {
+	pool := NewClientPoolWithConfig(PoolConfig{MaxConnections: 4, IdleTimeout: 50 * time.Millisecond})
+	defer pool.Close()
+
+	tempDir := t.TempDir()
+	c, err := cache.NewChunkStore(tempDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	chunkData := bytes.Repeat([]byte("z"), 1024)
+	chunkHash := chunk.ComputeHash(chunkData)
+	if err := c.PutChunk(chunkHash, chunkData); err != nil {
+		t.Fatal(err)
+	}
+	addr, stop := startTestServer(t, NewServer("n", c, nil))
+	defer stop()
+
+	ctx := context.Background()
+	if _, err := pool.DownloadChunk(ctx, addr, chunkHash); err != nil {
+		t.Fatal(err)
+	}
+	if pool.Len() != 1 {
+		t.Fatalf("expected 1 cached conn, got %d", pool.Len())
+	}
+	time.Sleep(150 * time.Millisecond)
+	pool.evictIdle()
+	if pool.Len() != 0 {
+		t.Fatalf("expected idle conn evicted, got %d", pool.Len())
+	}
+}

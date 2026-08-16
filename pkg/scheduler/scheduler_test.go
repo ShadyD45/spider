@@ -25,7 +25,7 @@ func TestCircuitBreaker(t *testing.T) {
 	s := New(2)
 	addr := "10.0.0.1:1"
 	for i := 0; i < 3; i++ {
-		s.End(addr, time.Millisecond, false)
+		s.End(addr, 0, time.Millisecond, false)
 	}
 	if !s.IsUntrusted(addr) {
 		t.Fatal("expected untrusted after 3 failures")
@@ -57,7 +57,7 @@ func TestWaitBegin(t *testing.T) {
 		t.Fatal("should block while inflight full")
 	case <-time.After(50 * time.Millisecond):
 	}
-	s.End("a", time.Millisecond, true)
+	s.End("a", 0, time.Millisecond, true)
 	select {
 	case <-acquired:
 	case <-time.After(time.Second):
@@ -73,7 +73,7 @@ func TestInflightCap(t *testing.T) {
 	if s.Begin("a") {
 		t.Fatal("second begin should fail")
 	}
-	s.End("a", time.Millisecond, true)
+	s.End("a", 0, time.Millisecond, true)
 	if !s.Begin("a") {
 		t.Fatal("after end")
 	}
@@ -90,5 +90,37 @@ func TestRankPeersPrefersLowerInflight(t *testing.T) {
 	})
 	if ranked[0].NodeId != "idle" {
 		t.Fatalf("expected idle first, got %s", ranked[0].NodeId)
+	}
+}
+
+func TestRankPeersPrefersHigherThroughput(t *testing.T) {
+	s := New(8)
+	fast := "10.0.0.1:1"
+	slow := "10.0.0.2:1"
+	for i := 0; i < 5; i++ {
+		s.End(fast, 10*1024*1024, 100*time.Millisecond, true)
+		s.End(slow, 100*1024, 100*time.Millisecond, true)
+	}
+	ranked := s.RankPeers(topology.Locality{Rack: "r1"}, []*proto.PeerInfo{
+		{NodeId: "slow", Address: slow, Rack: "r1"},
+		{NodeId: "fast", Address: fast, Rack: "r1"},
+	})
+	if ranked[0].NodeId != "fast" {
+		t.Fatalf("expected fast peer first, got %s", ranked[0].NodeId)
+	}
+}
+
+func TestThroughputEWMAConverges(t *testing.T) {
+	s := New(8)
+	addr := "10.0.0.1:1"
+	for i := 0; i < 10; i++ {
+		s.End(addr, 1024*1024, 100*time.Millisecond, true)
+	}
+	s.mu.Lock()
+	tp := s.stats[addr].Throughput
+	s.mu.Unlock()
+	want := float64(1024*1024) / 0.1
+	if tp < want*0.5 || tp > want*1.5 {
+		t.Fatalf("EWMA throughput %f, want near %f", tp, want)
 	}
 }

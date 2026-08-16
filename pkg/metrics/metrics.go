@@ -8,7 +8,11 @@ import (
 var (
 	OriginBytesSaved = promauto.NewCounter(prometheus.CounterOpts{
 		Name: "spider_origin_bytes_saved_total",
-		Help: "Bytes served from peers or local cache instead of origin",
+		Help: "Deprecated alias for spider_origin_bytes_avoided_total",
+	})
+	OriginBytesAvoided = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "spider_origin_bytes_avoided_total",
+		Help: "Bytes not read from origin (peer transfers + local cache reuse)",
 	})
 	OriginBytesDownloaded = promauto.NewCounter(prometheus.CounterOpts{
 		Name: "spider_origin_bytes_downloaded_total",
@@ -16,7 +20,43 @@ var (
 	})
 	PeerBytesTransferred = promauto.NewCounter(prometheus.CounterOpts{
 		Name: "spider_peer_bytes_transferred_total",
-		Help: "Bytes streamed from peer nodes",
+		Help: "Bytes received from peer nodes",
+	})
+	PeerBytesUploaded = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "spider_peer_bytes_uploaded_total",
+		Help: "Bytes sent to peer nodes from this node",
+	})
+	PeerBytesDownloaded = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "spider_peer_bytes_downloaded_total",
+		Help: "Bytes received from peer nodes on this node",
+	})
+	CacheBytesReused = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "spider_cache_bytes_reused_total",
+		Help: "Bytes of chunks already present in local cache at sync start",
+	})
+	SwarmUniqueSources = promauto.NewGauge(prometheus.GaugeOpts{
+		Name: "spider_swarm_unique_sources",
+		Help: "Distinct peer sources seen during the current artifact sync",
+	})
+	SwarmChunksWithPeers = promauto.NewGauge(prometheus.GaugeOpts{
+		Name: "spider_swarm_chunks_with_peers",
+		Help: "Missing chunks with at least one known peer during sync",
+	})
+	SwarmAmplificationRatio = promauto.NewGauge(prometheus.GaugeOpts{
+		Name: "spider_swarm_amplification_ratio",
+		Help: "Peer bytes transferred divided by origin bytes downloaded for the last completed sync",
+	})
+	AdvertisementSuccess = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "spider_advertisement_success_total",
+		Help: "Chunk hashes successfully reported to the tracker",
+	})
+	AdvertisementFailures = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "spider_advertisement_failures_total",
+		Help: "Chunk advertisement attempts that failed after retries",
+	})
+	AdvertisementQueueDepth = promauto.NewGauge(prometheus.GaugeOpts{
+		Name: "spider_advertisement_queue_depth",
+		Help: "Pending chunk hashes waiting to be advertised",
 	})
 	SyncDuration = promauto.NewHistogram(prometheus.HistogramOpts{
 		Name:    "spider_sync_duration_seconds",

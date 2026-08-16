@@ -32,6 +32,7 @@ type SyncMetrics struct {
 	SkippedChunks    int64
 	PeerBytes        int64
 	OriginBytes      int64
+	CacheBytesReused int64
 	Duration         time.Duration
 }
 
@@ -39,13 +40,13 @@ func (m *SyncMetrics) OriginBytesSaved() int64 {
 	if m == nil {
 		return 0
 	}
-	return m.PeerBytes
+	return m.PeerBytes + m.CacheBytesReused
 }
 
 func (m *SyncMetrics) FormatSummary() string {
-	saved := m.PeerBytes
-	return fmt.Sprintf("reused_chunks=%d peer_chunks=%d peer_bytes=%d origin_chunks=%d origin_bytes=%d origin_bytes_saved=%d duration=%s",
-		m.SkippedChunks, m.PeerChunks, m.PeerBytes, m.OriginChunks, m.OriginBytes, saved, m.Duration.Round(time.Millisecond))
+	saved := m.PeerBytes + m.CacheBytesReused
+	return fmt.Sprintf("reused_chunks=%d peer_chunks=%d peer_bytes=%d origin_chunks=%d origin_bytes=%d cache_bytes_reused=%d origin_bytes_saved=%d duration=%s",
+		m.SkippedChunks, m.PeerChunks, m.PeerBytes, m.OriginChunks, m.OriginBytes, m.CacheBytesReused, saved, m.Duration.Round(time.Millisecond))
 }
 
 type SyncJob struct {
@@ -77,6 +78,7 @@ type Engine struct {
 	originSem        chan struct{}
 	advertiseBatch   int
 	advertiseEvery   time.Duration
+	advertiseCfg     config.AdvertisementConfig
 	discoverEvery    time.Duration
 	retryAttempts    int
 	retryInitial     time.Duration
@@ -123,6 +125,12 @@ func NewEngine(cfg Config) *Engine {
 	if cfg.Advertisement.Interval <= 0 {
 		cfg.Advertisement.Interval = 100 * time.Millisecond
 	}
+	if cfg.Advertisement.MaxRetries <= 0 {
+		cfg.Advertisement.MaxRetries = 5
+	}
+	if cfg.Advertisement.RetryBackoff <= 0 {
+		cfg.Advertisement.RetryBackoff = 100 * time.Millisecond
+	}
 	if cfg.PeerDiscovery.RefreshInterval <= 0 {
 		cfg.PeerDiscovery.RefreshInterval = 500 * time.Millisecond
 	}
@@ -148,6 +156,7 @@ func NewEngine(cfg Config) *Engine {
 		originSem:        make(chan struct{}, cfg.MaxOriginConcurrency),
 		advertiseBatch:   cfg.Advertisement.BatchSize,
 		advertiseEvery:   cfg.Advertisement.Interval,
+		advertiseCfg:     cfg.Advertisement,
 		discoverEvery:    cfg.PeerDiscovery.RefreshInterval,
 		retryAttempts:    cfg.Retry.MaxAttempts,
 		retryInitial:     cfg.Retry.Backoff.Initial,
@@ -204,6 +213,25 @@ func (m *locationMap) get(hash string) []*proto.PeerInfo {
 	return append([]*proto.PeerInfo(nil), m.locs[hash]...)
 }
 
+func (m *locationMap) replace(hash string, peers []*proto.PeerInfo) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	seen := make(map[string]struct{})
+	var out []*proto.PeerInfo
+	for _, p := range peers {
+		if p == nil || p.Address == "" {
+			continue
+		}
+		if _, ok := seen[p.Address]; ok {
+			continue
+		}
+		seen[p.Address] = struct{}{}
+		out = append(out, p)
+	}
+	m.locs[hash] = out
+}
+
+// merge adds peers from non-tracker discovery hooks without removing existing entries.
 func (m *locationMap) merge(hash string, peers []*proto.PeerInfo) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -232,6 +260,33 @@ func (m *locationMap) merge(hash string, peers []*proto.PeerInfo) {
 	m.locs[hash] = out
 }
 
+func (m *locationMap) updateSwarmMetrics(remaining []string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	remainingSet := make(map[string]struct{}, len(remaining))
+	for _, h := range remaining {
+		remainingSet[h] = struct{}{}
+	}
+	unique := make(map[string]struct{})
+	withPeers := 0
+	for h, peers := range m.locs {
+		if _, ok := remainingSet[h]; !ok {
+			continue
+		}
+		if len(peers) == 0 {
+			continue
+		}
+		withPeers++
+		for _, p := range peers {
+			if p != nil && p.Address != "" {
+				unique[p.Address] = struct{}{}
+			}
+		}
+	}
+	metrics.SwarmUniqueSources.Set(float64(len(unique)))
+	metrics.SwarmChunksWithPeers.Set(float64(withPeers))
+}
+
 func (m *locationMap) snapshot() map[string][]*proto.PeerInfo {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -247,24 +302,41 @@ type chunkReporter interface {
 }
 
 type advertiser struct {
-	client    chunkReporter
-	nodeID    string
-	batchSize int
-	interval  time.Duration
-	ch        chan string
-	done      chan struct{}
-	finished  chan struct{}
+	client       chunkReporter
+	nodeID       string
+	batchSize    int
+	interval     time.Duration
+	maxRetries   int
+	retryInitial time.Duration
+	retryMax     time.Duration
+	ch           chan string
+	retry        []retryEntry
+	retryMu      sync.Mutex
+	done         chan struct{}
+	finished     chan struct{}
 }
 
-func newAdvertiser(client chunkReporter, nodeID string, batchSize int, interval time.Duration) *advertiser {
+type retryEntry struct {
+	hash    string
+	attempt int
+	nextAt  time.Time
+}
+
+func newAdvertiser(client chunkReporter, nodeID string, cfg config.AdvertisementConfig, retryMax time.Duration) *advertiser {
+	if retryMax <= 0 {
+		retryMax = 2 * time.Second
+	}
 	a := &advertiser{
-		client:    client,
-		nodeID:    nodeID,
-		batchSize: batchSize,
-		interval:  interval,
-		ch:        make(chan string, 1024),
-		done:      make(chan struct{}),
-		finished:  make(chan struct{}),
+		client:       client,
+		nodeID:       nodeID,
+		batchSize:    cfg.BatchSize,
+		interval:     cfg.Interval,
+		maxRetries:   cfg.MaxRetries,
+		retryInitial: cfg.RetryBackoff,
+		retryMax:     retryMax,
+		ch:           make(chan string, 1024),
+		done:         make(chan struct{}),
+		finished:     make(chan struct{}),
 	}
 	go a.loop()
 	return a
@@ -276,8 +348,9 @@ func (a *advertiser) enqueue(hash string) {
 	}
 	select {
 	case a.ch <- hash:
+		metrics.AdvertisementQueueDepth.Inc()
 	default:
-		a.flush([]string{hash})
+		_ = a.flush([]string{hash}, 0)
 	}
 }
 
@@ -290,7 +363,7 @@ func (a *advertiser) loop() {
 		if len(buf) == 0 {
 			return
 		}
-		a.flush(buf)
+		_ = a.flush(buf, 0)
 		buf = buf[:0]
 	}
 	for {
@@ -302,6 +375,7 @@ func (a *advertiser) loop() {
 					buf = append(buf, h)
 				default:
 					flush()
+					a.flushRetries(true)
 					return
 				}
 			}
@@ -312,20 +386,81 @@ func (a *advertiser) loop() {
 			}
 		case <-t.C:
 			flush()
+			a.flushRetries(false)
 		}
 	}
 }
 
-func (a *advertiser) flush(hashes []string) {
-	if a.client == nil || len(hashes) == 0 {
+func (a *advertiser) scheduleRetry(hashes []string, attempt int) {
+	if len(hashes) == 0 {
 		return
 	}
+	backoff := a.retryInitial
+	for i := 1; i < attempt; i++ {
+		backoff *= 2
+		if backoff > a.retryMax {
+			backoff = a.retryMax
+			break
+		}
+	}
+	nextAt := time.Now().Add(backoff)
+	a.retryMu.Lock()
+	defer a.retryMu.Unlock()
+	const maxRetryQueue = 4096
+	for _, h := range hashes {
+		if len(a.retry) >= maxRetryQueue {
+			slog.Warn("advertisement retry queue full, dropping hash", "hash", h)
+			metrics.AdvertisementFailures.Inc()
+			continue
+		}
+		a.retry = append(a.retry, retryEntry{hash: h, attempt: attempt, nextAt: nextAt})
+		metrics.AdvertisementQueueDepth.Inc()
+	}
+}
+
+func (a *advertiser) flushRetries(force bool) {
+	now := time.Now()
+	a.retryMu.Lock()
+	var ready []string
+	var attempts []int
+	var rest []retryEntry
+	for _, e := range a.retry {
+		if force || !e.nextAt.After(now) {
+			ready = append(ready, e.hash)
+			attempts = append(attempts, e.attempt)
+		} else {
+			rest = append(rest, e)
+		}
+	}
+	a.retry = rest
+	a.retryMu.Unlock()
+	for i, h := range ready {
+		_ = a.flush([]string{h}, attempts[i])
+	}
+}
+
+func (a *advertiser) flush(hashes []string, attempt int) error {
+	if a.client == nil || len(hashes) == 0 {
+		return nil
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	_, _ = a.client.ReportChunks(ctx, &proto.ReportChunksRequest{
+	defer cancel()
+	_, err := a.client.ReportChunks(ctx, &proto.ReportChunksRequest{
 		NodeId:      a.nodeID,
 		ChunkHashes: hashes,
 	})
-	cancel()
+	if err != nil {
+		if attempt+1 < a.maxRetries {
+			a.scheduleRetry(hashes, attempt+1)
+		} else {
+			metrics.AdvertisementFailures.Add(float64(len(hashes)))
+			slog.Warn("chunk advertisement failed after retries", "count", len(hashes), "err", err)
+		}
+		return err
+	}
+	metrics.AdvertisementSuccess.Add(float64(len(hashes)))
+	metrics.AdvertisementQueueDepth.Sub(float64(len(hashes)))
+	return nil
 }
 
 func (a *advertiser) stop() {
@@ -361,11 +496,16 @@ func (e *Engine) Sync(ctx context.Context, jobID string, manifest *v1.ArtifactMa
 	seenMissing := make(map[string]struct{})
 	hashToWork := make(map[string]chunkWorkItem)
 
+	var cacheBytesReused int64
 	for _, fileEntry := range manifest.Files {
 		for _, chunkRef := range fileEntry.Chunks {
 			if e.cache.HasChunk(chunkRef.Hash) {
 				atomic.AddInt64(&job.SkippedChunks, 1)
+				atomic.AddInt64(&cacheBytesReused, chunkRef.Size)
 				metrics.CacheHits.Inc()
+				metrics.CacheBytesReused.Add(float64(chunkRef.Size))
+				metrics.OriginBytesAvoided.Add(float64(chunkRef.Size))
+				metrics.OriginBytesSaved.Add(float64(chunkRef.Size))
 				continue
 			}
 			if _, exists := seenMissing[chunkRef.Hash]; exists {
@@ -382,7 +522,12 @@ func (e *Engine) Sync(ctx context.Context, jobID string, manifest *v1.ArtifactMa
 	slog.Info("sync start", "artifact", manifest.Name, "version", manifest.Version, "total", len(allHashes), "missing", len(missingItems), "reused", job.SkippedChunks)
 
 	locs := &locationMap{locs: make(map[string][]*proto.PeerInfo)}
+	defer func() {
+		metrics.SwarmUniqueSources.Set(0)
+		metrics.SwarmChunksWithPeers.Set(0)
+	}()
 	e.refreshLocations(ctx, manifest.ArtifactID, missingHashes, locs)
+	locs.updateSwarmMetrics(missingHashes)
 
 	refreshCtx, stopRefresh := context.WithCancel(ctx)
 	defer stopRefresh()
@@ -405,12 +550,13 @@ func (e *Engine) Sync(ctx context.Context, jobID string, manifest *v1.ArtifactMa
 						return
 					}
 					e.refreshLocations(refreshCtx, manifest.ArtifactID, remaining, locs)
+					locs.updateSwarmMetrics(remaining)
 				}
 			}
 		}()
 	}
 
-	ad := newAdvertiser(e.trackerClient, e.nodeID, e.advertiseBatch, e.advertiseEvery)
+	ad := newAdvertiser(e.trackerClient, e.nodeID, e.advertiseCfg, e.retryMax)
 	defer ad.stop()
 
 	if len(missingItems) > 0 {
@@ -446,6 +592,8 @@ func (e *Engine) Sync(ctx context.Context, jobID string, manifest *v1.ArtifactMa
 						atomic.AddInt64(&job.PeerChunks, 1)
 						atomic.AddInt64(&job.PeerBytes, n)
 						metrics.PeerBytesTransferred.Add(float64(n))
+						metrics.PeerBytesDownloaded.Add(float64(n))
+						metrics.OriginBytesAvoided.Add(float64(n))
 						metrics.OriginBytesSaved.Add(float64(n))
 					} else {
 						atomic.AddInt64(&job.OriginChunks, 1)
@@ -494,7 +642,13 @@ func (e *Engine) Sync(ctx context.Context, jobID string, manifest *v1.ArtifactMa
 		SkippedChunks:    job.SkippedChunks,
 		PeerBytes:        job.PeerBytes,
 		OriginBytes:      job.OriginBytes,
+		CacheBytesReused: cacheBytesReused,
 		Duration:         duration,
+	}
+	if job.OriginBytes > 0 {
+		metrics.SwarmAmplificationRatio.Set(float64(job.PeerBytes) / float64(job.OriginBytes))
+	} else if job.PeerBytes > 0 {
+		metrics.SwarmAmplificationRatio.Set(float64(job.PeerBytes))
 	}
 	slog.Info("sync completed", "artifact", manifest.Name, "version", manifest.Version, "summary", m.FormatSummary())
 	return m, nil
@@ -511,7 +665,7 @@ func (e *Engine) refreshLocations(ctx context.Context, artifactID string, hashes
 		ArtifactId:      artifactID,
 	}); err == nil && len(art.GetSeedPeers()) > 0 {
 		for _, h := range hashes {
-			locs.merge(h, art.GetSeedPeers())
+			locs.replace(h, art.GetSeedPeers())
 		}
 	}
 	resp, err := e.trackerClient.LocateChunks(locateCtx, &proto.LocateChunksRequest{
@@ -523,9 +677,7 @@ func (e *Engine) refreshLocations(ctx context.Context, artifactID string, hashes
 		return
 	}
 	for _, loc := range resp.GetLocations() {
-		if len(loc.GetPeers()) > 0 {
-			locs.merge(loc.GetChunkHash(), loc.GetPeers())
-		}
+		locs.replace(loc.GetChunkHash(), loc.GetPeers())
 	}
 }
 
@@ -559,11 +711,14 @@ func (e *Engine) fetchChunk(ctx context.Context, work chunkWorkItem, origin sour
 			peerCancel()
 			addAssigned(assigned, addr, -1)
 			ok := fetchErr == nil
-			e.scheduler.End(addr, time.Since(start), ok)
+			e.scheduler.End(addr, n, time.Since(start), ok)
 			if !ok {
 				slog.Warn("p2p download failed", "peer", p.GetNodeId(), "addr", addr, "chunk", work.hash, "err", fetchErr)
 				if fetchErr != nil && (errors.Is(fetchErr, context.DeadlineExceeded) || containsCorrupt(fetchErr)) {
 					metrics.ChunkVerifyFailures.Inc()
+				}
+				if e.scheduler.IsUntrusted(addr) {
+					e.clientPool.RemovePeer(addr)
 				}
 				continue
 			}

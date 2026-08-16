@@ -191,7 +191,10 @@ func main() {
 		advAddress = fmt.Sprintf("%s:%d", *nodeID, *port)
 	}
 
-	clientPool := peer.NewClientPool()
+	clientPool := peer.NewClientPoolWithConfig(peer.PoolConfig{
+		MaxConnections: cfg.PeerClient.MaxConnections,
+		IdleTimeout:    cfg.PeerClient.IdleTimeout,
+	})
 	eng := engine.NewEngine(engine.Config{
 		NodeID:             *nodeID,
 		Locality:           loc,

@@ -16,6 +16,7 @@ import (
 	"google.golang.org/grpc"
 	"spider/api/v1/proto"
 	"spider/pkg/cache"
+	"spider/pkg/config"
 	"spider/pkg/materializer"
 	"spider/pkg/peer"
 	"spider/pkg/source"
@@ -395,7 +396,12 @@ func TestAdvertiserFlushesBeforeStop(t *testing.T) {
 		reports = append(reports, append([]string(nil), hashes...))
 		mu.Unlock()
 	}}
-	ad := newAdvertiser(client, "node-a", 4, 50*time.Millisecond)
+	ad := newAdvertiser(client, "node-a", config.AdvertisementConfig{
+		BatchSize:    4,
+		Interval:     50 * time.Millisecond,
+		MaxRetries:   5,
+		RetryBackoff: 10 * time.Millisecond,
+	}, 2*time.Second)
 	ad.enqueue("sha256:aa")
 	ad.enqueue("sha256:bb")
 	ad.stop()
@@ -597,6 +603,55 @@ func TestOriginConcurrencyLimit(t *testing.T) {
 	if wrapped.max > 1 {
 		t.Fatalf("expected at most 1 concurrent origin fetch, saw %d", wrapped.max)
 	}
+}
+
+func TestLocationMapReconcilesStalePeers(t *testing.T) {
+	locs := &locationMap{locs: map[string][]*proto.PeerInfo{
+		"chunk-x": {{NodeId: "a", Address: "10.0.0.1:1"}},
+	}}
+	locs.replace("chunk-x", []*proto.PeerInfo{
+		{NodeId: "b", Address: "10.0.0.2:1"},
+		{NodeId: "c", Address: "10.0.0.3:1"},
+	})
+	peers := locs.get("chunk-x")
+	if len(peers) != 2 {
+		t.Fatalf("expected 2 peers after replace, got %d", len(peers))
+	}
+	for _, p := range peers {
+		if p.NodeId == "a" {
+			t.Fatal("stale peer A should be removed")
+		}
+	}
+}
+
+func TestAdvertiserRetriesOnFailure(t *testing.T) {
+	var calls atomic.Int32
+	failClient := &failingReporter{failUntil: 2, calls: &calls}
+	ad := newAdvertiser(failClient, "node-a", config.AdvertisementConfig{
+		BatchSize:    1,
+		Interval:     20 * time.Millisecond,
+		MaxRetries:   5,
+		RetryBackoff: 10 * time.Millisecond,
+	}, 200*time.Millisecond)
+	ad.enqueue("sha256:retry")
+	time.Sleep(300 * time.Millisecond)
+	ad.stop()
+	if calls.Load() < 2 {
+		t.Fatalf("expected retries, got %d calls", calls.Load())
+	}
+}
+
+type failingReporter struct {
+	failUntil int32
+	calls     *atomic.Int32
+}
+
+func (f *failingReporter) ReportChunks(_ context.Context, _ *proto.ReportChunksRequest, _ ...grpc.CallOption) (*proto.ReportChunksResponse, error) {
+	n := f.calls.Add(1)
+	if n <= f.failUntil {
+		return nil, fmt.Errorf("tracker unavailable")
+	}
+	return &proto.ReportChunksResponse{ChunksRecorded: 1}, nil
 }
 
 func TestSortByAssignedPrefersLessLoadedPeer(t *testing.T) {

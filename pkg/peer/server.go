@@ -8,14 +8,15 @@ import (
 	"net"
 	"strconv"
 	"sync/atomic"
-	"time"
 
+	"golang.org/x/time/rate"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
 	"spider/api/v1/proto"
 	"spider/pkg/cache"
+	"spider/pkg/metrics"
 )
 
 const (
@@ -46,7 +47,7 @@ type Server struct {
 	slots        chan struct{}
 	queued       atomic.Int64
 	maxQueue     int
-	bytesPerSec  int64
+	limiter      *rate.Limiter
 	afterAcquire func()
 }
 
@@ -71,7 +72,8 @@ func NewServerWithLimits(nodeID string, c *cache.ChunkStore, syncHandler SyncHan
 		maxQueue:    lim.MaxQueueSize,
 	}
 	if lim.MaxBandwidthMbps > 0 {
-		s.bytesPerSec = int64(lim.MaxBandwidthMbps) * 1024 * 1024 / 8
+		bytesPerSec := float64(lim.MaxBandwidthMbps) * 1024 * 1024 / 8
+		s.limiter = rate.NewLimiter(rate.Limit(bytesPerSec), StreamSliceSize)
 	}
 	if lim.AfterAcquire != nil {
 		s.afterAcquire = lim.AfterAcquire
@@ -114,14 +116,11 @@ func (s *Server) releaseUpload() {
 	}
 }
 
-func (s *Server) throttle(n int) {
-	if s.bytesPerSec <= 0 || n <= 0 {
-		return
+func (s *Server) waitBandwidth(ctx context.Context, n int) error {
+	if s.limiter == nil || n <= 0 {
+		return nil
 	}
-	sleep := time.Duration(float64(n) / float64(s.bytesPerSec) * float64(time.Second))
-	if sleep > 0 {
-		time.Sleep(sleep)
-	}
+	return s.limiter.WaitN(ctx, n)
 }
 
 // GetChunk streams a content-addressed chunk to a requesting peer.
@@ -173,7 +172,9 @@ func (s *Server) GetChunk(req *proto.GetChunkRequest, stream proto.PeerService_G
 	for {
 		n, err := reader.Read(buf)
 		if n > 0 {
-			s.throttle(n)
+			if err := s.waitBandwidth(stream.Context(), n); err != nil {
+				return status.FromContextError(err).Err()
+			}
 			isEOF := (currentOffset + int64(n)) >= totalSize
 			payload := make([]byte, n)
 			copy(payload, buf[:n])
@@ -188,6 +189,7 @@ func (s *Server) GetChunk(req *proto.GetChunkRequest, stream proto.PeerService_G
 			if err := stream.Send(chunkData); err != nil {
 				return status.Errorf(codes.Canceled, "failed to send chunk slice: %v", err)
 			}
+			metrics.PeerBytesUploaded.Add(float64(n))
 
 			currentOffset += int64(n)
 		}

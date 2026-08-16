@@ -16,27 +16,107 @@ import (
 	"spider/api/v1/proto"
 )
 
-// ClientPool manages gRPC connections to mesh peers.
-type ClientPool struct {
-	mu    sync.RWMutex
-	conns map[string]*grpc.ClientConn
+// PoolConfig controls gRPC client connection reuse and eviction.
+type PoolConfig struct {
+	MaxConnections int
+	IdleTimeout    time.Duration
 }
 
-// NewClientPool initializes a connection pool.
+// DefaultPoolConfig returns production-safe client pool defaults.
+func DefaultPoolConfig() PoolConfig {
+	return PoolConfig{MaxConnections: 64, IdleTimeout: 2 * time.Minute}
+}
+
+type pooledConn struct {
+	conn     *grpc.ClientConn
+	lastUsed time.Time
+}
+
+// ClientPool manages gRPC connections to mesh peers.
+type ClientPool struct {
+	mu          sync.Mutex
+	conns       map[string]*pooledConn
+	maxConns    int
+	idleTimeout time.Duration
+	stopCh      chan struct{}
+	stopped     bool
+}
+
+// NewClientPool initializes a connection pool with defaults.
 func NewClientPool() *ClientPool {
-	return &ClientPool{
-		conns: make(map[string]*grpc.ClientConn),
+	return NewClientPoolWithConfig(DefaultPoolConfig())
+}
+
+// NewClientPoolWithConfig initializes a connection pool with explicit limits.
+func NewClientPoolWithConfig(cfg PoolConfig) *ClientPool {
+	if cfg.MaxConnections <= 0 {
+		cfg.MaxConnections = 64
+	}
+	if cfg.IdleTimeout <= 0 {
+		cfg.IdleTimeout = 2 * time.Minute
+	}
+	p := &ClientPool{
+		conns:       make(map[string]*pooledConn),
+		maxConns:    cfg.MaxConnections,
+		idleTimeout: cfg.IdleTimeout,
+		stopCh:      make(chan struct{}),
+	}
+	go p.evictLoop()
+	return p
+}
+
+func (p *ClientPool) evictLoop() {
+	t := time.NewTicker(p.idleTimeout / 2)
+	defer t.Stop()
+	for {
+		select {
+		case <-p.stopCh:
+			return
+		case <-t.C:
+			p.evictIdle()
+		}
+	}
+}
+
+func (p *ClientPool) evictIdle() {
+	now := time.Now()
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for addr, pc := range p.conns {
+		if now.Sub(pc.lastUsed) >= p.idleTimeout {
+			_ = pc.conn.Close()
+			delete(p.conns, addr)
+		}
+	}
+}
+
+func (p *ClientPool) evictOldestLocked() {
+	var oldestAddr string
+	var oldest time.Time
+	for addr, pc := range p.conns {
+		if oldestAddr == "" || pc.lastUsed.Before(oldest) {
+			oldestAddr = addr
+			oldest = pc.lastUsed
+		}
+	}
+	if oldestAddr != "" {
+		_ = p.conns[oldestAddr].conn.Close()
+		delete(p.conns, oldestAddr)
 	}
 }
 
 // GetClient retrieves or dials a gRPC connection to peerAddress.
 func (p *ClientPool) GetClient(ctx context.Context, peerAddress string) (proto.PeerServiceClient, error) {
-	p.mu.RLock()
-	if conn, ok := p.conns[peerAddress]; ok {
-		p.mu.RUnlock()
-		return proto.NewPeerServiceClient(conn), nil
+	p.mu.Lock()
+	if pc, ok := p.conns[peerAddress]; ok {
+		pc.lastUsed = time.Now()
+		p.mu.Unlock()
+		return proto.NewPeerServiceClient(pc.conn), nil
 	}
-	p.mu.RUnlock()
+	if len(p.conns) >= p.maxConns {
+		p.evictOldestLocked()
+	}
+	p.mu.Unlock()
 
 	dialCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
 	defer cancel()
@@ -49,25 +129,50 @@ func (p *ClientPool) GetClient(ctx context.Context, peerAddress string) (proto.P
 	}
 
 	p.mu.Lock()
+	defer p.mu.Unlock()
 	if existing, ok := p.conns[peerAddress]; ok {
-		p.mu.Unlock()
 		_ = conn.Close()
-		return proto.NewPeerServiceClient(existing), nil
+		existing.lastUsed = time.Now()
+		return proto.NewPeerServiceClient(existing.conn), nil
 	}
-	p.conns[peerAddress] = conn
-	p.mu.Unlock()
+	if len(p.conns) >= p.maxConns {
+		p.evictOldestLocked()
+	}
+	p.conns[peerAddress] = &pooledConn{conn: conn, lastUsed: time.Now()}
 	return proto.NewPeerServiceClient(conn), nil
 }
 
-// Close closes all cached peer connections.
-func (p *ClientPool) Close() {
+// RemovePeer closes and removes a cached connection.
+func (p *ClientPool) RemovePeer(peerAddress string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-
-	for _, conn := range p.conns {
-		_ = conn.Close()
+	if pc, ok := p.conns[peerAddress]; ok {
+		_ = pc.conn.Close()
+		delete(p.conns, peerAddress)
 	}
-	p.conns = make(map[string]*grpc.ClientConn)
+}
+
+// Len returns the number of cached connections (for tests).
+func (p *ClientPool) Len() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return len(p.conns)
+}
+
+// Close closes all cached peer connections and stops the eviction loop.
+func (p *ClientPool) Close() {
+	p.mu.Lock()
+	if p.stopped {
+		p.mu.Unlock()
+		return
+	}
+	p.stopped = true
+	close(p.stopCh)
+	for _, pc := range p.conns {
+		_ = pc.conn.Close()
+	}
+	p.conns = make(map[string]*pooledConn)
+	p.mu.Unlock()
 }
 
 // DownloadChunkTo streams chunk bytes starting at offset into w. Hash is verified by the chunk store, not here.
@@ -90,13 +195,14 @@ func (p *ClientPool) DownloadChunkTo(ctx context.Context, peerAddress, chunkHash
 
 	var totalSize int64
 	var skipped int64
+	var downloaded int64
 	for {
 		chunkData, err := stream.Recv()
 		if err == io.EOF {
 			break
 		}
 		if err != nil {
-			return totalSize, fmt.Errorf("error reading chunk stream from %s: %w", peerAddress, err)
+			return downloaded, fmt.Errorf("error reading chunk stream from %s: %w", peerAddress, err)
 		}
 		if chunkData.TotalSize > 0 {
 			totalSize = chunkData.TotalSize
@@ -116,8 +222,9 @@ func (p *ClientPool) DownloadChunkTo(ctx context.Context, peerAddress, chunkHash
 		}
 		if len(payload) > 0 {
 			if _, err := w.Write(payload); err != nil {
-				return totalSize, fmt.Errorf("failed to write chunk stream: %w", err)
+				return downloaded, fmt.Errorf("failed to write chunk stream: %w", err)
 			}
+			downloaded += int64(len(payload))
 		}
 		if chunkData.IsEof {
 			break

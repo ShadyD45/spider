@@ -13,11 +13,13 @@ import (
 const (
 	untrustedAfter = 3
 	untrustedFor   = 15 * time.Minute
+	ewmaAlpha      = 1.0 / 8.0
 )
 
-// Stats records EWMA latency and success for a peer address.
+// Stats records EWMA latency, throughput, and success for a peer address.
 type Stats struct {
 	RTT         time.Duration
+	Throughput  float64 // bytes per second EWMA
 	Inflight    int
 	Failures    int
 	UntrustedAt time.Time
@@ -46,7 +48,7 @@ func (s *Scheduler) stat(addr string) *Stats {
 	return st
 }
 
-// RankPeers orders candidates: locality, then EWMA RTT, then inflight. Untrusted peers are omitted unless none remain.
+// RankPeers orders candidates: locality, inflight, throughput, RTT. Untrusted peers are omitted unless none remain.
 func (s *Scheduler) RankPeers(self topology.Locality, peers []*proto.PeerInfo) []*proto.PeerInfo {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -87,6 +89,9 @@ func (s *Scheduler) sortLoad(self topology.Locality, peers []*proto.PeerInfo) {
 		if si.Inflight != sj.Inflight {
 			return si.Inflight < sj.Inflight
 		}
+		if si.Throughput != sj.Throughput {
+			return si.Throughput > sj.Throughput
+		}
 		if si.RTT != sj.RTT {
 			return si.RTT < sj.RTT
 		}
@@ -119,17 +124,27 @@ func (s *Scheduler) WaitBegin(ctx context.Context, addr string) bool {
 	}
 }
 
-func (s *Scheduler) End(addr string, d time.Duration, ok bool) {
+func (s *Scheduler) End(addr string, nbytes int64, d time.Duration, ok bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	st := s.stat(addr)
 	if st.Inflight > 0 {
 		st.Inflight--
 	}
-	if st.RTT == 0 {
-		st.RTT = d
-	} else {
-		st.RTT = (st.RTT*7 + d) / 8
+	if d > 0 {
+		if st.RTT == 0 {
+			st.RTT = d
+		} else {
+			st.RTT = time.Duration(float64(st.RTT)*(1-ewmaAlpha) + float64(d)*ewmaAlpha)
+		}
+		if nbytes > 0 {
+			sample := float64(nbytes) / d.Seconds()
+			if st.Throughput == 0 {
+				st.Throughput = sample
+			} else {
+				st.Throughput = st.Throughput*(1-ewmaAlpha) + sample*ewmaAlpha
+			}
+		}
 	}
 	if ok {
 		st.Failures = 0
@@ -158,7 +173,6 @@ func RarestFirst(hashes []string, locations map[string][]*proto.PeerInfo) []stri
 	for _, h := range hashes {
 		items = append(items, item{h: h, n: len(locations[h])})
 	}
-	// sort by n ascending but keep original order for ties — simple insertion
 	for i := 1; i < len(items); i++ {
 		j := i
 		for j > 0 && items[j].n < items[j-1].n {
