@@ -1,6 +1,7 @@
 package source
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -117,6 +118,16 @@ func (s *S3Source) ListFiles(ctx context.Context, prefix string) ([]FileInfo, er
 
 // ReadChunk performs a byte-range GET request for the object.
 func (s *S3Source) ReadChunk(ctx context.Context, path string, offset int64, size int64) ([]byte, error) {
+	var buf bytes.Buffer
+	n, err := s.ReadChunkTo(ctx, path, offset, size, &buf)
+	if err != nil {
+		return nil, err
+	}
+	return buf.Bytes()[:n], nil
+}
+
+// ReadChunkTo streams a byte-range GET into w.
+func (s *S3Source) ReadChunkTo(ctx context.Context, path string, offset int64, size int64, w io.Writer) (int64, error) {
 	key := strings.TrimPrefix(v1.NormalizePath(path), "/")
 	rangeHeader := fmt.Sprintf("bytes=%d-%d", offset, offset+size-1)
 
@@ -128,17 +139,15 @@ func (s *S3Source) ReadChunk(ctx context.Context, path string, offset int64, siz
 
 	output, err := s.client.GetObject(ctx, input)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get object chunk %s (%s): %w", key, rangeHeader, err)
+		return 0, fmt.Errorf("failed to get object chunk %s (%s): %w", key, rangeHeader, err)
 	}
 	defer output.Body.Close()
 
-	buf := make([]byte, size)
-	n, err := io.ReadFull(output.Body, buf)
+	n, err := io.CopyN(w, output.Body, size)
 	if err != nil && err != io.EOF && err != io.ErrUnexpectedEOF {
-		return nil, fmt.Errorf("failed to read chunk payload %s: %w", key, err)
+		return n, fmt.Errorf("failed to read chunk payload %s: %w", key, err)
 	}
-
-	return buf[:n], nil
+	return n, nil
 }
 
 // Open returns a streaming reader for full object download.

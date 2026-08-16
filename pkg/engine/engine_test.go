@@ -307,6 +307,12 @@ func (t *tamperedOrigin) ReadChunk(ctx context.Context, path string, offset int6
 	return []byte("ORIGIN_RETURNED_TAMPERED_BYTES!!"), nil
 }
 
+func (t *tamperedOrigin) ReadChunkTo(ctx context.Context, path string, offset int64, size int64, w io.Writer) (int64, error) {
+	data := []byte("ORIGIN_RETURNED_TAMPERED_BYTES!!")
+	n, err := w.Write(data)
+	return int64(n), err
+}
+
 func (t *tamperedOrigin) Open(ctx context.Context, path string) (io.ReadCloser, error) {
 	return t.inner.Open(ctx, path)
 }
@@ -488,6 +494,108 @@ func TestEngineResumesPartialFromPeer(t *testing.T) {
 	}
 	if !leecherCache.HasChunk(hashes[0]) || !leecherCache.HasChunk(hashes[1]) {
 		t.Fatal("expected all chunks after resume sync")
+	}
+}
+
+func TestPendingQueuePicksRarestFirst(t *testing.T) {
+	locs := &locationMap{locs: map[string][]*proto.PeerInfo{
+		"common": {{NodeId: "p1", Address: "a"}, {NodeId: "p2", Address: "b"}, {NodeId: "p3", Address: "c"}},
+		"rare":   {{NodeId: "p1", Address: "a"}},
+	}}
+	q := newPendingQueue([]chunkWorkItem{
+		{hash: "common"},
+		{hash: "rare"},
+	})
+	work, ok := q.next(locs)
+	if !ok {
+		t.Fatal("expected work item")
+	}
+	if work.hash != "rare" {
+		t.Fatalf("expected rare chunk first, got %s", work.hash)
+	}
+	work, ok = q.next(locs)
+	if !ok || work.hash != "common" {
+		t.Fatalf("expected common chunk second, got %v ok=%v", work.hash, ok)
+	}
+	if _, ok = q.next(locs); ok {
+		t.Fatal("expected queue empty")
+	}
+}
+
+type countingOrigin struct {
+	source.Source
+	mu       sync.Mutex
+	inflight int
+	max      int
+	delay    time.Duration
+}
+
+func (c *countingOrigin) ReadChunkTo(ctx context.Context, path string, offset int64, size int64, w io.Writer) (int64, error) {
+	c.mu.Lock()
+	c.inflight++
+	if c.inflight > c.max {
+		c.max = c.inflight
+	}
+	c.mu.Unlock()
+	defer func() {
+		c.mu.Lock()
+		c.inflight--
+		c.mu.Unlock()
+	}()
+	if c.delay > 0 {
+		select {
+		case <-time.After(c.delay):
+		case <-ctx.Done():
+			return 0, ctx.Err()
+		}
+	}
+	return c.Source.ReadChunkTo(ctx, path, offset, size, w)
+}
+
+func TestOriginConcurrencyLimit(t *testing.T) {
+	ctx := context.Background()
+	originDir := t.TempDir()
+	data := make([]byte, 64)
+	for i := range data {
+		data[i] = byte(i)
+	}
+	if err := os.WriteFile(filepath.Join(originDir, "payload.bin"), data, 0644); err != nil {
+		t.Fatal(err)
+	}
+	inner, err := source.NewFilesystemSource(originDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wrapped := &countingOrigin{Source: inner, delay: 25 * time.Millisecond}
+
+	c, err := cache.NewCache(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	pub := NewPublisher(c, 16)
+	manifest, err := pub.Publish(ctx, inner, "", "origin-cap", "1")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	leecherCache, err := cache.NewCache(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	eng := NewEngine(Config{
+		Cache:                leecherCache,
+		MaxPeerConcurrency:   4,
+		MaxOriginConcurrency: 1,
+	})
+	metrics, err := eng.Sync(ctx, "origin-cap-job", manifest, t.TempDir(), wrapped)
+	if err != nil {
+		t.Fatalf("sync failed: %v", err)
+	}
+	if metrics.OriginChunks != 4 {
+		t.Fatalf("expected 4 origin chunks, got %d", metrics.OriginChunks)
+	}
+	if wrapped.max > 1 {
+		t.Fatalf("expected at most 1 concurrent origin fetch, saw %d", wrapped.max)
 	}
 }
 

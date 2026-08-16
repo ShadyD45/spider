@@ -25,6 +25,7 @@ type Config struct {
 	Advertisement AdvertisementConfig `yaml:"advertisement"`
 	PeerDiscovery PeerDiscoveryConfig `yaml:"peerDiscovery"`
 	Download      DownloadConfig      `yaml:"download"`
+	Origin        OriginConfig        `yaml:"origin"`
 	Upload        UploadConfig        `yaml:"upload"`
 	Retry         RetryConfig         `yaml:"retry"`
 }
@@ -91,6 +92,10 @@ type DownloadConfig struct {
 	MaxConcurrency int `yaml:"maxConcurrency"`
 }
 
+type OriginConfig struct {
+	MaxConcurrency int `yaml:"maxConcurrency"`
+}
+
 type UploadConfig struct {
 	MaxConcurrency   int `yaml:"maxConcurrency"`
 	MaxBandwidthMbps int `yaml:"maxBandwidthMbps"`
@@ -119,6 +124,7 @@ type fileConfig struct {
 	Advertisement *AdvertisementConfig `yaml:"advertisement"`
 	PeerDiscovery *PeerDiscoveryConfig `yaml:"peerDiscovery"`
 	Download      *DownloadConfig      `yaml:"download"`
+	Origin        *OriginConfig        `yaml:"origin"`
 	Upload        *UploadConfig        `yaml:"upload"`
 	Retry         *RetryConfig         `yaml:"retry"`
 }
@@ -156,6 +162,7 @@ func Defaults() Config {
 		Advertisement: AdvertisementConfig{BatchSize: 16, Interval: 100 * time.Millisecond},
 		PeerDiscovery: PeerDiscoveryConfig{RefreshInterval: 500 * time.Millisecond},
 		Download:      DownloadConfig{MaxConcurrency: 8},
+		Origin:        OriginConfig{MaxConcurrency: 4},
 		Upload:        UploadConfig{MaxConcurrency: 16, MaxQueueSize: 100},
 		Retry: RetryConfig{
 			MaxAttempts: 3,
@@ -238,6 +245,9 @@ func (c *Config) applyZeroDefaults() {
 	}
 	if c.Download.MaxConcurrency <= 0 {
 		c.Download.MaxConcurrency = 8
+	}
+	if c.Origin.MaxConcurrency <= 0 {
+		c.Origin.MaxConcurrency = 4
 	}
 	if c.Upload.MaxConcurrency <= 0 {
 		c.Upload.MaxConcurrency = 16

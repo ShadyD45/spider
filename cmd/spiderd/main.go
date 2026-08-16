@@ -200,8 +200,9 @@ func main() {
 		ClientPool:         clientPool,
 		Materializer:       materializer.NewMaterializer(materializer.DefaultOptions()),
 		Scheduler:          scheduler.New(cfg.Download.MaxConcurrency),
-		MaxPeerConcurrency: cfg.Download.MaxConcurrency,
-		Advertisement:      cfg.Advertisement,
+		MaxPeerConcurrency:   cfg.Download.MaxConcurrency,
+		MaxOriginConcurrency: cfg.Origin.MaxConcurrency,
+		Advertisement:        cfg.Advertisement,
 		PeerDiscovery:      cfg.PeerDiscovery,
 		Retry:              cfg.Retry,
 	})

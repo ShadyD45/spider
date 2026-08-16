@@ -51,6 +51,8 @@ peerDiscovery:
   refreshInterval: 500ms
 download:
   maxConcurrency: 8
+origin:
+  maxConcurrency: 4
 upload:
   maxConcurrency: 16
   maxBandwidthMbps: 0    # 0 = unlimited

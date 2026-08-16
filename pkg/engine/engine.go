@@ -1,7 +1,6 @@
 package engine
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -75,6 +74,7 @@ type Engine struct {
 	scheduler        *scheduler.Scheduler
 	maxPeerWorkers   int
 	maxOriginWorkers int
+	originSem        chan struct{}
 	advertiseBatch   int
 	advertiseEvery   time.Duration
 	discoverEvery    time.Duration
@@ -145,6 +145,7 @@ func NewEngine(cfg Config) *Engine {
 		scheduler:        cfg.Scheduler,
 		maxPeerWorkers:   cfg.MaxPeerConcurrency,
 		maxOriginWorkers: cfg.MaxOriginConcurrency,
+		originSem:        make(chan struct{}, cfg.MaxOriginConcurrency),
 		advertiseBatch:   cfg.Advertisement.BatchSize,
 		advertiseEvery:   cfg.Advertisement.Interval,
 		discoverEvery:    cfg.PeerDiscovery.RefreshInterval,
@@ -160,6 +161,36 @@ type chunkWorkItem struct {
 	filePath string
 	offset   int64
 	size     int64
+}
+
+type pendingQueue struct {
+	mu    sync.Mutex
+	items map[string]chunkWorkItem
+}
+
+func newPendingQueue(items []chunkWorkItem) *pendingQueue {
+	m := make(map[string]chunkWorkItem, len(items))
+	for _, it := range items {
+		m[it.hash] = it
+	}
+	return &pendingQueue{items: m}
+}
+
+func (q *pendingQueue) next(locs *locationMap) (chunkWorkItem, bool) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	if len(q.items) == 0 {
+		return chunkWorkItem{}, false
+	}
+	hashes := make([]string, 0, len(q.items))
+	for h := range q.items {
+		hashes = append(hashes, h)
+	}
+	order := scheduler.RarestFirst(hashes, locs.snapshot())
+	pick := order[0]
+	work := q.items[pick]
+	delete(q.items, pick)
+	return work, true
 }
 
 type locationMap struct {
@@ -387,23 +418,22 @@ func (e *Engine) Sync(ctx context.Context, jobID string, manifest *v1.ArtifactMa
 		var downloadErr atomic.Value
 		var assigned sync.Map // addr -> *int64
 
-		workCh := make(chan chunkWorkItem, len(missingItems))
-		order := scheduler.RarestFirst(missingHashes, locs.snapshot())
-		for _, hash := range order {
-			workCh <- hashToWork[hash]
-		}
-		close(workCh)
+		pending := newPendingQueue(missingItems)
 
 		for i := 0; i < e.maxPeerWorkers; i++ {
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
-				for work := range workCh {
+				for {
 					if ctx.Err() != nil {
 						downloadErr.Store(ctx.Err())
 						return
 					}
 					if downloadErr.Load() != nil {
+						return
+					}
+					work, ok := pending.next(locs)
+					if !ok {
 						return
 					}
 					fromPeer, n, err := e.fetchChunk(ctx, work, origin, locs, &assigned)
@@ -621,7 +651,25 @@ func (e *Engine) downloadFromPeer(ctx context.Context, addr, hash string) (int64
 	return total, nil
 }
 
+func (e *Engine) acquireOrigin(ctx context.Context) error {
+	select {
+	case e.originSem <- struct{}{}:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func (e *Engine) releaseOrigin() {
+	<-e.originSem
+}
+
 func (e *Engine) downloadFromOrigin(ctx context.Context, work chunkWorkItem, origin source.Source) (int64, error) {
+	if err := e.acquireOrigin(ctx); err != nil {
+		return 0, err
+	}
+	defer e.releaseOrigin()
+
 	partial := e.cache.PartialSize(work.hash)
 	remain := work.size - partial
 	if remain < 0 {
@@ -630,13 +678,32 @@ func (e *Engine) downloadFromOrigin(ctx context.Context, work chunkWorkItem, ori
 		remain = work.size
 	}
 	originCtx, originCancel := context.WithTimeout(ctx, 30*time.Second)
-	data, fetchErr := origin.ReadChunk(originCtx, work.filePath, work.offset+partial, remain)
-	originCancel()
+	defer originCancel()
+
+	pr, pw := io.Pipe()
+	var total int64
+	var fetchErr error
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		total, fetchErr = origin.ReadChunkTo(originCtx, work.filePath, work.offset+partial, remain, pw)
+		if fetchErr != nil {
+			_ = pw.CloseWithError(fmt.Errorf("failed to fetch chunk %s from origin (%s offset %d): %w", work.hash, work.filePath, work.offset, fetchErr))
+			return
+		}
+		_ = pw.Close()
+	}()
+	appendErr := e.cache.AppendPartial(work.hash, pr)
+	<-done
 	if fetchErr != nil {
-		return 0, fmt.Errorf("failed to fetch chunk %s from origin (%s offset %d): %w", work.hash, work.filePath, work.offset, fetchErr)
+		return 0, fetchErr
 	}
-	if err := e.cache.AppendPartial(work.hash, bytes.NewReader(data)); err != nil {
-		return 0, err
+	if appendErr != nil {
+		return 0, appendErr
+	}
+	got := e.cache.PartialSize(work.hash)
+	if total > 0 && got < total {
+		return 0, fmt.Errorf("%w: have %d want %d", cache.ErrIncomplete, got, total)
 	}
 	if err := e.cache.CommitPartial(work.hash); err != nil {
 		if errors.Is(err, cache.ErrHashMismatch) {
@@ -646,7 +713,10 @@ func (e *Engine) downloadFromOrigin(ctx context.Context, work chunkWorkItem, ori
 		}
 		return 0, fmt.Errorf("failed to commit chunk %s to cache: %w", work.hash, err)
 	}
-	return work.size, nil
+	if total <= 0 {
+		total = got
+	}
+	return total, nil
 }
 
 func containsCorrupt(err error) bool {
