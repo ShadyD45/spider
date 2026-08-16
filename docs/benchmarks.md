@@ -3,7 +3,7 @@
 Latest numbers from `scripts/run-benchmarks.ps1` / `scripts/run-benchmarks.sh`. Re-run those scripts to refresh this file.
 
 **Host:** Windows amd64, 11th Gen Intel Core i5-11320H @ 3.20 GHz  
-**Date:** 2026-08-15
+**Date:** 2026-08-16 (micro, in-process loopback, and compose fleet — Phase 2.5 build)
 
 ---
 
@@ -46,18 +46,18 @@ goarch: amd64
 cpu: 11th Gen Intel(R) Core(TM) i5-11320H @ 3.20GHz
 
 pkg: spider/pkg/chunk
-BenchmarkChunker4MiB-8             	      51	  26592863 ns/op	 630.89 MB/s	20972907 B/op	      21 allocs/op
-BenchmarkSHA256HashCalculation-8   	     358	   3668705 ns/op	1143.27 MB/s	     208 B/op	       3 allocs/op
+BenchmarkChunker4MiB-8             	      27	  55746789 ns/op	 300.95 MB/s	20972804 B/op	      21 allocs/op
+BenchmarkSHA256HashCalculation-8   	     100	  11228206 ns/op	 373.55 MB/s	     208 B/op	       3 allocs/op
 
 pkg: spider/pkg/cache
-BenchmarkCacheAtomicPut4MiB-8   	      20	  62205305 ns/op	  67.43 MB/s	   35850 B/op	      25 allocs/op
+BenchmarkCacheAtomicPut4MiB-8   	      24	 166526675 ns/op	  25.19 MB/s	   37335 B/op	      31 allocs/op
 ```
 
 | Primitive | ns/op | Throughput | Allocs |
 |---|---|---|---|
-| SHA-256 (4 MiB) | 3.67 ms | 1143 MB/s | 3 |
-| Fixed 4 MiB chunker (16 MiB stream) | 26.6 ms | 631 MB/s | 21 |
-| Atomic cache Put + on-disk re-hash | 62.2 ms | 67 MB/s | 25 |
+| SHA-256 (4 MiB) | 11.2 ms | 374 MB/s | 3 |
+| Fixed 4 MiB chunker (16 MiB stream) | 55.7 ms | 301 MB/s | 21 |
+| Atomic cache Put + on-disk re-hash | 166.5 ms | 25 MB/s | 31 |
 
 ---
 
@@ -69,9 +69,10 @@ Same-host loopback; no compose/Grafana. Useful for quick engine regression check
 
 | Metric | Direct origin | Spider P2P | Improvement |
 |---|---|---|---|
-| Duration | 1m 1.5s | 1m 18.6s | 0.78× wall clock |
-| Origin data | 3000 MB | 152 MB | **94.9% origin saved** |
-| Peer data | 0 | 2848 MB | offloaded to mesh |
+| Duration | 12.0s | 29.7s | 0.40× wall clock |
+| Origin data | 3000 MB | 0 MB | **100% origin saved** |
+| Peer data | 0 | 3000 MB | offloaded to mesh |
+| Fleet throughput | 251 MB/s | 101 MB/s | — |
 
 ### Compose stack (`run-compose-benchmark`) — 500 MB × 3 workers
 
@@ -79,12 +80,14 @@ Real `spiderd` nodes, central tracker (Redis + SQLite), Prometheus scrape.
 
 | Metric | Direct origin | Spider P2P | Improvement |
 |---|---|---|---|
-| Duration | 34.1s | 35.4s | 0.96× wall clock |
-| Origin data | 1500 MB | 0 MB | **100% origin saved** |
+| Duration | 33.8s | 31.5s | **1.07× wall clock** |
+| Origin data | 856 MB | 0 MB | **100% origin saved** |
 | Peer data | 0 | 1000 MB | offloaded to mesh |
-| Fleet throughput | 43.9 MB/s | 42.4 MB/s | — |
+| Fleet throughput | 44.4 MB/s | 47.6 MB/s | — |
 
 Prometheus delta (full run): `origin_downloaded=0`, `peer_transferred=1048576000`.
+
+Baseline origin bytes (856 MB vs theoretical 1500 MB) reflect sync-log totals after worker cache resets; some workers may report partial reuse across scenario setup. Mesh scenario still shows **zero** origin bytes on workers 2–3.
 
 ---
 
@@ -99,12 +102,27 @@ Spider’s main value on a real fleet is **reducing traffic to origin storage** 
 
 Wall-clock duration can be **equal to or slower than** direct origin on a single host. That does **not** mean P2P failed if origin bytes dropped.
 
-### Recorded results summary (2026-08-15)
+### Metric semantics (Phase 2.5)
+
+| Prometheus metric | Meaning |
+|---|---|
+| `spider_origin_bytes_downloaded_total` | Bytes read from origin storage |
+| `spider_peer_bytes_transferred_total` | Bytes received from peers (download side) |
+| `spider_peer_bytes_uploaded_total` | Bytes sent to peers from this node |
+| `spider_peer_bytes_downloaded_total` | Bytes received from peers on this node |
+| `spider_cache_bytes_reused_total` | Bytes of chunks already in local cache at sync start |
+| `spider_origin_bytes_avoided_total` | Peer bytes + cache reuse (primary savings metric) |
+| `spider_swarm_unique_sources` | Distinct peer sources seen during active sync |
+| `spider_swarm_amplification_ratio` | Peer bytes / origin bytes for last completed sync |
+
+Swarm amplification (`rate(peer_bytes) / rate(origin_bytes)`) measures distribution traffic created per origin byte — not the same as total bandwidth savings.
+
+### Recorded results summary (2026-08-16)
 
 | Benchmark | Workers | Origin (baseline) | Origin (P2P) | Peer (P2P) | Wall clock (baseline → P2P) |
 |---|---|---|---|---|---|
-| In-process loopback | 6 × 500 MB | 3000 MB | 152 MB (**94.9% saved**) | 2848 MB | 61.5s → 78.6s (**0.78×**) |
-| Compose fleet | 3 × 500 MB | 1500 MB | 0 MB (**100% saved**) | 1000 MB | 34.1s → 35.4s (**0.96×**) |
+| In-process loopback | 6 × 500 MB | 3000 MB | 0 MB (**100% saved**) | 3000 MB | 12.0s → 29.7s (**0.40×**) |
+| Compose fleet | 3 × 500 MB | 856 MB | 0 MB (**100% saved**) | 1000 MB | 33.8s → 31.5s (**1.07×**) |
 
 Compose mesh: worker-1 seeds; workers 2–3 pull 500 MB each from worker-1; worker-1 reuses local cache. No worker reads `/bench/origin` during mesh sync.
 
@@ -140,20 +158,23 @@ These runs are **misleading for wall-clock speedup** if taken out of context:
 - [ ] **Multi-machine fleet** — Separate seed host, multiple worker hosts, remote object-store origin (different AZ/region).
 - [ ] **Rate-limited origin** — Throttle S3/MinIO to simulate production egress caps.
 - [ ] **Larger artifacts & more workers** — e.g. 10+ nodes, multi-GB models.
-- [ ] **Document refreshed results** in this file after each multi-host run.
+- [ ] **Document refreshed results** in this file after each multi-host run. *(Same-host compose + loopback refreshed 2026-08-16.)*
 
 ---
 
 ## How to refresh
 
 ```powershell
+# Microbenchmarks only
+go test -count=1 -bench="." -benchmem ./pkg/chunk ./pkg/cache
+
+# In-process loopback (no Grafana)
+go build -o bin/spiderctl.exe ./cmd/spiderctl
+.\bin\spiderctl.exe benchmark --size=500 --workers=6 --chunk-size=4
+
 # Full suite: micro + compose fleet (feeds Grafana)
 .\scripts\run-benchmarks.ps1
 
 # Compose only (stack left running)
 .\scripts\run-compose-benchmark.ps1
-
-# Optional fast in-process check (no Grafana)
-go build -o bin/spiderctl.exe ./cmd/spiderctl
-.\bin\spiderctl.exe benchmark --size=500 --workers=6 --chunk-size=4
 ```

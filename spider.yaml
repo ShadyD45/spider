@@ -1,15 +1,25 @@
 store:
   driver: sqlite          # memory | sqlite | postgres | <registered>
   dsn: /var/lib/spider/tracker.db
+  # Postgres example (bring-your-own):
+  #   driver: postgres
+  #   dsn: ${SPIDER_STORE_DSN}  # postgres://user:pass@db.example:5432/spider?sslmode=require
   # Zero pool fields use driver defaults. Same pool keys apply to new SQL backends.
   pool:
     maxOpenConns: 8
     maxIdleConns: 8
     connMaxLifetime: 0s
     connMaxIdleTime: 0s
-cache:
+
+# Tracker metadata cache (not chunk bytes). Alias key: cache
+metaCache:
   driver: memory          # none | memory | redis | <registered>
   ttl: 10s
+  # Postgres + no cache: set driver to none
+  # Managed Redis example:
+  #   driver: redis
+  #   redis:
+  #     url: ${SPIDER_CACHE_REDIS_URL}  # redis://:pass@cache.example:6379/0
   redis:
     addr: 127.0.0.1:6379
     prefix: "spider:"
@@ -22,11 +32,39 @@ cache:
       writeTimeout: 2s
       poolTimeout: 4s
       connMaxIdleTime: 5m
+
 httpAddr: ":9090"
 logFormat: json
-diskCache:
+
+# On-disk content-addressed chunks. Alias key: diskCache
+chunkCache:
   dir: /var/lib/spider
   maxBytes: 536870912000
   lowWatermark: 0.80
   highWatermark: 0.90
   pinnedArtifacts: []
+
+advertisement:
+  batchSize: 16
+  interval: 100ms
+  maxRetries: 5
+  retryBackoff: 100ms
+  maxRetryBackoff: 5s
+peerDiscovery:
+  refreshInterval: 500ms
+download:
+  maxConcurrency: 8
+origin:
+  maxConcurrency: 4
+upload:
+  maxConcurrency: 16
+  maxBandwidthMbps: 0    # 0 = unlimited
+  maxQueueSize: 100
+peerClient:
+  maxConnections: 64
+  idleTimeout: 2m
+retry:
+  maxAttempts: 3
+  backoff:
+    initial: 100ms
+    max: 2s

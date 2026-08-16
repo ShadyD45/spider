@@ -29,7 +29,7 @@ graph TD
   8. `cmd/spiderctl`: Publisher and management CLI (`publish`, `inspect`, `sync`, `status`, `peers`, `cache`, `verify`).
   9. `deploy/podman`: Podman Compose configuration and setup scripts simulating MinIO seed storage, central tracker, and 3+ worker nodes across simulated racks/zones.
 
-### **Phase 2: Framework Hardening & Core Reliability** *(Current Focus)*
+### **Phase 2: Framework Hardening & Core Reliability** *(Complete)*
 * Pluggable `Store` (memory / SQLite WAL / Postgres) and metadata `Cache` (none / memory / Redis) with write-path invalidation. **No GORM.**
 * Compact seed advertisements (`ReportArtifact` / `LocateArtifact`); per-chunk rows only for partial nodes.
 * Swarm scheduler: locality + EWMA + rarest-first + per-peer caps + circuit breaker.

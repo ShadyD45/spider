@@ -23,9 +23,9 @@ type indexFile struct {
 	Pins   map[string][]string  `json:"pins"` // artifactID -> chunk hashes
 }
 
-// Manager enforces disk quotas with refcounted LRU eviction and artifact pins.
-type Manager struct {
-	cache         *Cache
+// QuotaManager enforces disk quotas with refcounted LRU eviction and artifact pins.
+type QuotaManager struct {
+	cache         *ChunkStore
 	maxBytes      int64
 	lowWatermark  float64
 	highWatermark float64
@@ -34,7 +34,7 @@ type Manager struct {
 	path          string
 }
 
-func NewManager(c *Cache, maxBytes int64, low, high float64) (*Manager, error) {
+func NewQuotaManager(c *ChunkStore, maxBytes int64, low, high float64) (*QuotaManager, error) {
 	if c == nil {
 		return nil, os.ErrInvalid
 	}
@@ -47,7 +47,7 @@ func NewManager(c *Cache, maxBytes int64, low, high float64) (*Manager, error) {
 	if high <= 0 {
 		high = 0.90
 	}
-	m := &Manager{
+	m := &QuotaManager{
 		cache:         c,
 		maxBytes:      maxBytes,
 		lowWatermark:  low,
@@ -63,7 +63,15 @@ func NewManager(c *Cache, maxBytes int64, low, high float64) (*Manager, error) {
 	return m, nil
 }
 
-func (m *Manager) load() error {
+// Manager is a compatibility alias for QuotaManager.
+type Manager = QuotaManager
+
+// NewManager is a compatibility alias for NewQuotaManager.
+func NewManager(c *ChunkStore, maxBytes int64, low, high float64) (*QuotaManager, error) {
+	return NewQuotaManager(c, maxBytes, low, high)
+}
+
+func (m *QuotaManager) load() error {
 	data, err := os.ReadFile(m.path)
 	if err != nil {
 		return err
@@ -71,7 +79,7 @@ func (m *Manager) load() error {
 	return json.Unmarshal(data, &m.idx)
 }
 
-func (m *Manager) save() error {
+func (m *QuotaManager) save() error {
 	data, err := json.MarshalIndent(m.idx, "", "  ")
 	if err != nil {
 		return err
@@ -83,7 +91,7 @@ func (m *Manager) save() error {
 	return os.Rename(tmp, m.path)
 }
 
-func (m *Manager) reconcileFromDisk() error {
+func (m *QuotaManager) reconcileFromDisk() error {
 	hashes, err := m.cache.ListChunks()
 	if err != nil {
 		return err
@@ -106,7 +114,7 @@ func (m *Manager) reconcileFromDisk() error {
 	return m.save()
 }
 
-func (m *Manager) Touch(hash string, size int64) {
+func (m *QuotaManager) Touch(hash string, size int64) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	meta := m.idx.Chunks[hash]
@@ -119,7 +127,7 @@ func (m *Manager) Touch(hash string, size int64) {
 	_ = m.save()
 }
 
-func (m *Manager) Pin(manifest *v1.ArtifactManifest) error {
+func (m *QuotaManager) Pin(manifest *v1.ArtifactManifest) error {
 	if manifest == nil {
 		return nil
 	}
@@ -136,7 +144,7 @@ func (m *Manager) Pin(manifest *v1.ArtifactManifest) error {
 	return m.save()
 }
 
-func (m *Manager) Unpin(artifactID string) error {
+func (m *QuotaManager) Unpin(artifactID string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	hashes := m.idx.Pins[artifactID]
@@ -151,7 +159,7 @@ func (m *Manager) Unpin(artifactID string) error {
 	return m.save()
 }
 
-func (m *Manager) Pinned() []string {
+func (m *QuotaManager) Pinned() []string {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	var ids []string
@@ -162,7 +170,7 @@ func (m *Manager) Pinned() []string {
 	return ids
 }
 
-func (m *Manager) UsedBytes() int64 {
+func (m *QuotaManager) UsedBytes() int64 {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	var n int64
@@ -172,7 +180,7 @@ func (m *Manager) UsedBytes() int64 {
 	return n
 }
 
-func (m *Manager) MaybeEvict() (int, error) {
+func (m *QuotaManager) MaybeEvict() (int, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	used := int64(0)

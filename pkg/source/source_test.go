@@ -1,6 +1,7 @@
 package source
 
 import (
+	"bytes"
 	"context"
 	"os"
 	"path/filepath"
@@ -42,6 +43,15 @@ func TestFilesystemSource(t *testing.T) {
 	}
 	if string(chunkBytes) != "ABCDEF" {
 		t.Fatalf("Expected 'ABCDEF', got %q", string(chunkBytes))
+	}
+
+	var streamed bytes.Buffer
+	n, err := src.ReadChunkTo(ctx, "models/v1/weights.bin", 10, 6, &streamed)
+	if err != nil {
+		t.Fatalf("ReadChunkTo failed: %v", err)
+	}
+	if n != 6 || streamed.String() != "ABCDEF" {
+		t.Fatalf("ReadChunkTo: n=%d data=%q", n, streamed.String())
 	}
 
 	srcFile, err := NewPathSource(f1Path)

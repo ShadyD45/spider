@@ -26,7 +26,8 @@ func main() {
 	storeDriver := flag.String("store-driver", "", "memory | sqlite | postgres")
 	storeDSN := flag.String("store-dsn", "", "Store DSN")
 	cacheDriver := flag.String("cache-driver", "", "none | memory | redis")
-	cacheRedisAddr := flag.String("cache-redis-addr", "", "Redis address when cache-driver=redis")
+	cacheRedisAddr := flag.String("cache-redis-addr", "", "Redis host:port when cache-driver=redis")
+	cacheRedisURL := flag.String("cache-redis-url", "", "Redis URL (redis:// or rediss://)")
 	logFormat := flag.String("log-format", "", "text | json")
 	flag.Parse()
 
@@ -48,12 +49,23 @@ func main() {
 		cfg.Store.DSN = *storeDSN
 	}
 	if *cacheDriver != "" {
-		cfg.Cache.Driver = *cacheDriver
+		cfg.MetaCache.Driver = *cacheDriver
 	}
 	if *cacheRedisAddr != "" {
-		cfg.Cache.Redis.Addr = *cacheRedisAddr
+		cfg.MetaCache.Redis.Addr = *cacheRedisAddr
 	}
+	if *cacheRedisURL != "" {
+		cfg.MetaCache.Redis.URL = *cacheRedisURL
+	}
+	cfg.Cache = cfg.MetaCache
 	logging.SetDefault(cfg.LogFormat)
+
+	slog.Info("tracker backends",
+		"store", cfg.Store.Driver,
+		"dsn", config.RedactedDSN(cfg.Store.DSN),
+		"metaCache", cfg.MetaCache.Driver,
+		"redis", cfg.MetaCache.Redis.RedisEndpoint(),
+	)
 
 	st, err := store.Open(cfg.Store.Driver, store.Options{
 		DSN:  cfg.Store.DSN,
@@ -65,19 +77,20 @@ func main() {
 	}
 	defer st.Close()
 
-	mc, err := metacache.Open(cfg.Cache.Driver, metacache.Options{
-		TTL:      cfg.Cache.TTL,
-		Addr:     cfg.Cache.Redis.Addr,
-		Password: cfg.Cache.Redis.Password,
-		DB:       cfg.Cache.Redis.DB,
-		Prefix:   cfg.Cache.Redis.Prefix,
-		Pool:     cachePool(cfg.Cache.Redis.Pool),
+	mc, err := metacache.Open(cfg.MetaCache.Driver, metacache.Options{
+		TTL:      cfg.MetaCache.TTL,
+		URL:      cfg.MetaCache.Redis.URL,
+		Addr:     cfg.MetaCache.Redis.Addr,
+		Password: cfg.MetaCache.Redis.Password,
+		DB:       cfg.MetaCache.Redis.DB,
+		Prefix:   cfg.MetaCache.Redis.Prefix,
+		Pool:     cachePool(cfg.MetaCache.Redis.Pool),
 	})
 	if err != nil {
 		slog.Error("open metadata cache", "err", err)
 		os.Exit(1)
 	}
-	st = store.Wrap(st, mc, cfg.Cache.TTL)
+	st = store.Wrap(st, mc, cfg.MetaCache.TTL)
 
 	reg := tracker.NewRegistryWithStore(st, *expiry)
 	server := tracker.NewServer(reg)

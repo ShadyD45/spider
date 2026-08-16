@@ -7,6 +7,9 @@ $ErrorActionPreference = "Stop"
 $Root = Split-Path $PSScriptRoot -Parent
 Set-Location $Root
 
+. (Join-Path $PSScriptRoot "windows-podman.ps1")
+Initialize-SpiderPodmanEnv
+
 & (Join-Path $PSScriptRoot "build-binaries.ps1")
 
 $container = $null

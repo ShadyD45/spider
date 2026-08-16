@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"strings"
 	"sync"
@@ -12,7 +13,9 @@ import (
 
 	v1 "spider/api/v1"
 	"spider/api/v1/proto"
+	"spider/pkg/advertise"
 	"spider/pkg/cache"
+	"spider/pkg/config"
 	"spider/pkg/materializer"
 	"spider/pkg/metrics"
 	"spider/pkg/peer"
@@ -29,6 +32,7 @@ type SyncMetrics struct {
 	SkippedChunks    int64
 	PeerBytes        int64
 	OriginBytes      int64
+	CacheBytesReused int64
 	Duration         time.Duration
 }
 
@@ -36,13 +40,13 @@ func (m *SyncMetrics) OriginBytesSaved() int64 {
 	if m == nil {
 		return 0
 	}
-	return m.PeerBytes
+	return m.PeerBytes + m.CacheBytesReused
 }
 
 func (m *SyncMetrics) FormatSummary() string {
-	saved := m.PeerBytes
-	return fmt.Sprintf("reused_chunks=%d peer_chunks=%d peer_bytes=%d origin_chunks=%d origin_bytes=%d origin_bytes_saved=%d duration=%s",
-		m.SkippedChunks, m.PeerChunks, m.PeerBytes, m.OriginChunks, m.OriginBytes, saved, m.Duration.Round(time.Millisecond))
+	saved := m.PeerBytes + m.CacheBytesReused
+	return fmt.Sprintf("reused_chunks=%d peer_chunks=%d peer_bytes=%d origin_chunks=%d origin_bytes=%d cache_bytes_reused=%d origin_bytes_saved=%d duration=%s",
+		m.SkippedChunks, m.PeerChunks, m.PeerBytes, m.OriginChunks, m.OriginBytes, m.CacheBytesReused, saved, m.Duration.Round(time.Millisecond))
 }
 
 type SyncJob struct {
@@ -64,13 +68,21 @@ type SyncJob struct {
 type Engine struct {
 	nodeID           string
 	locality         topology.Locality
-	cache            *cache.Cache
+	cache            *cache.ChunkStore
 	trackerClient    proto.TrackerServiceClient
 	clientPool       *peer.ClientPool
 	materializer     *materializer.Materializer
 	scheduler        *scheduler.Scheduler
 	maxPeerWorkers   int
 	maxOriginWorkers int
+	originSem        chan struct{}
+	advertiseBatch   int
+	advertiseEvery   time.Duration
+	advertiseCfg     config.AdvertisementConfig
+	discoverEvery    time.Duration
+	retryAttempts    int
+	retryInitial     time.Duration
+	retryMax         time.Duration
 
 	mu   sync.RWMutex
 	jobs map[string]*SyncJob
@@ -79,13 +91,16 @@ type Engine struct {
 type Config struct {
 	NodeID               string
 	Locality             topology.Locality
-	Cache                *cache.Cache
+	Cache                *cache.ChunkStore
 	TrackerClient        proto.TrackerServiceClient
 	ClientPool           *peer.ClientPool
 	Materializer         *materializer.Materializer
 	Scheduler            *scheduler.Scheduler
 	MaxPeerConcurrency   int
 	MaxOriginConcurrency int
+	Advertisement        config.AdvertisementConfig
+	PeerDiscovery        config.PeerDiscoveryConfig
+	Retry                config.RetryConfig
 }
 
 func NewEngine(cfg Config) *Engine {
@@ -104,6 +119,30 @@ func NewEngine(cfg Config) *Engine {
 	if cfg.Scheduler == nil {
 		cfg.Scheduler = scheduler.New(cfg.MaxPeerConcurrency)
 	}
+	if cfg.Advertisement.BatchSize <= 0 {
+		cfg.Advertisement.BatchSize = 16
+	}
+	if cfg.Advertisement.Interval <= 0 {
+		cfg.Advertisement.Interval = 100 * time.Millisecond
+	}
+	if cfg.Advertisement.MaxRetries <= 0 {
+		cfg.Advertisement.MaxRetries = 5
+	}
+	if cfg.Advertisement.RetryBackoff <= 0 {
+		cfg.Advertisement.RetryBackoff = 100 * time.Millisecond
+	}
+	if cfg.PeerDiscovery.RefreshInterval <= 0 {
+		cfg.PeerDiscovery.RefreshInterval = 500 * time.Millisecond
+	}
+	if cfg.Retry.MaxAttempts <= 0 {
+		cfg.Retry.MaxAttempts = 3
+	}
+	if cfg.Retry.Backoff.Initial <= 0 {
+		cfg.Retry.Backoff.Initial = 100 * time.Millisecond
+	}
+	if cfg.Retry.Backoff.Max <= 0 {
+		cfg.Retry.Backoff.Max = 2 * time.Second
+	}
 	return &Engine{
 		nodeID:           cfg.NodeID,
 		locality:         cfg.Locality,
@@ -114,6 +153,14 @@ func NewEngine(cfg Config) *Engine {
 		scheduler:        cfg.Scheduler,
 		maxPeerWorkers:   cfg.MaxPeerConcurrency,
 		maxOriginWorkers: cfg.MaxOriginConcurrency,
+		originSem:        make(chan struct{}, cfg.MaxOriginConcurrency),
+		advertiseBatch:   cfg.Advertisement.BatchSize,
+		advertiseEvery:   cfg.Advertisement.Interval,
+		advertiseCfg:     cfg.Advertisement,
+		discoverEvery:    cfg.PeerDiscovery.RefreshInterval,
+		retryAttempts:    cfg.Retry.MaxAttempts,
+		retryInitial:     cfg.Retry.Backoff.Initial,
+		retryMax:         cfg.Retry.Backoff.Max,
 		jobs:             make(map[string]*SyncJob),
 	}
 }
@@ -123,6 +170,138 @@ type chunkWorkItem struct {
 	filePath string
 	offset   int64
 	size     int64
+}
+
+type pendingQueue struct {
+	mu    sync.Mutex
+	items map[string]chunkWorkItem
+}
+
+func newPendingQueue(items []chunkWorkItem) *pendingQueue {
+	m := make(map[string]chunkWorkItem, len(items))
+	for _, it := range items {
+		m[it.hash] = it
+	}
+	return &pendingQueue{items: m}
+}
+
+func (q *pendingQueue) next(locs *locationMap) (chunkWorkItem, bool) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	if len(q.items) == 0 {
+		return chunkWorkItem{}, false
+	}
+	hashes := make([]string, 0, len(q.items))
+	for h := range q.items {
+		hashes = append(hashes, h)
+	}
+	order := scheduler.RarestFirst(hashes, locs.snapshot())
+	pick := order[0]
+	work := q.items[pick]
+	delete(q.items, pick)
+	return work, true
+}
+
+type locationMap struct {
+	mu   sync.Mutex
+	locs map[string][]*proto.PeerInfo
+}
+
+func (m *locationMap) get(hash string) []*proto.PeerInfo {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return append([]*proto.PeerInfo(nil), m.locs[hash]...)
+}
+
+func (m *locationMap) replace(hash string, peers []*proto.PeerInfo) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	seen := make(map[string]struct{})
+	var out []*proto.PeerInfo
+	for _, p := range peers {
+		if p == nil || p.Address == "" {
+			continue
+		}
+		if _, ok := seen[p.Address]; ok {
+			continue
+		}
+		seen[p.Address] = struct{}{}
+		out = append(out, p)
+	}
+	m.locs[hash] = out
+}
+
+// merge adds peers from non-tracker discovery hooks without removing existing entries.
+func (m *locationMap) merge(hash string, peers []*proto.PeerInfo) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	seen := make(map[string]struct{})
+	var out []*proto.PeerInfo
+	for _, p := range m.locs[hash] {
+		if p == nil || p.Address == "" {
+			continue
+		}
+		if _, ok := seen[p.Address]; ok {
+			continue
+		}
+		seen[p.Address] = struct{}{}
+		out = append(out, p)
+	}
+	for _, p := range peers {
+		if p == nil || p.Address == "" {
+			continue
+		}
+		if _, ok := seen[p.Address]; ok {
+			continue
+		}
+		seen[p.Address] = struct{}{}
+		out = append(out, p)
+	}
+	m.locs[hash] = out
+}
+
+func (m *locationMap) updateSwarmMetrics(remaining []string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	remainingSet := make(map[string]struct{}, len(remaining))
+	for _, h := range remaining {
+		remainingSet[h] = struct{}{}
+	}
+	unique := make(map[string]struct{})
+	withPeers := 0
+	totalPeerSources := 0
+	for h, peers := range m.locs {
+		if _, ok := remainingSet[h]; !ok {
+			continue
+		}
+		if len(peers) == 0 {
+			continue
+		}
+		withPeers++
+		totalPeerSources += len(peers)
+		for _, p := range peers {
+			if p != nil && p.Address != "" {
+				unique[p.Address] = struct{}{}
+			}
+		}
+	}
+	metrics.SwarmUniqueSources.Set(float64(len(unique)))
+	metrics.SwarmChunksWithPeers.Set(float64(withPeers))
+	if withPeers > 0 {
+		metrics.SwarmAvgChunkReplication.Set(float64(totalPeerSources) / float64(withPeers))
+	} else {
+		metrics.SwarmAvgChunkReplication.Set(0)
+	}
+}
+
+func (m *locationMap) snapshot() map[string][]*proto.PeerInfo {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := make(map[string][]*proto.PeerInfo, len(m.locs))
+	for k, v := range m.locs {
+		out[k] = append([]*proto.PeerInfo(nil), v...)
+	}
+	return out
 }
 
 func (e *Engine) Sync(ctx context.Context, jobID string, manifest *v1.ArtifactManifest, destDir string, origin source.Source) (*SyncMetrics, error) {
@@ -150,11 +329,16 @@ func (e *Engine) Sync(ctx context.Context, jobID string, manifest *v1.ArtifactMa
 	seenMissing := make(map[string]struct{})
 	hashToWork := make(map[string]chunkWorkItem)
 
+	var cacheBytesReused int64
 	for _, fileEntry := range manifest.Files {
 		for _, chunkRef := range fileEntry.Chunks {
-			if e.cache.HasChunk(chunkRef.Hash) {
+			if e.cache.HasValidCommittedChunk(chunkRef.Hash, chunkRef.Size) {
 				atomic.AddInt64(&job.SkippedChunks, 1)
+				atomic.AddInt64(&cacheBytesReused, chunkRef.Size)
 				metrics.CacheHits.Inc()
+				metrics.CacheBytesReused.Add(float64(chunkRef.Size))
+				metrics.OriginBytesAvoided.Add(float64(chunkRef.Size))
+				metrics.OriginBytesSaved.Add(float64(chunkRef.Size))
 				continue
 			}
 			if _, exists := seenMissing[chunkRef.Hash]; exists {
@@ -170,134 +354,90 @@ func (e *Engine) Sync(ctx context.Context, jobID string, manifest *v1.ArtifactMa
 
 	slog.Info("sync start", "artifact", manifest.Name, "version", manifest.Version, "total", len(allHashes), "missing", len(missingItems), "reused", job.SkippedChunks)
 
-	peerLocations := make(map[string][]*proto.PeerInfo)
+	locs := &locationMap{locs: make(map[string][]*proto.PeerInfo)}
+	defer func() {
+		metrics.SwarmUniqueSources.Set(0)
+		metrics.SwarmChunksWithPeers.Set(0)
+		metrics.SwarmAvgChunkReplication.Set(0)
+	}()
+	e.refreshLocations(ctx, manifest.ArtifactID, missingHashes, locs)
+	locs.updateSwarmMetrics(missingHashes)
+
+	refreshCtx, stopRefresh := context.WithCancel(ctx)
+	defer stopRefresh()
 	if e.trackerClient != nil && len(missingHashes) > 0 {
-		locateCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-		if art, err := e.trackerClient.LocateArtifact(locateCtx, &proto.LocateArtifactRequest{
-			RequesterNodeId: e.nodeID,
-			ArtifactId:      manifest.ArtifactID,
-		}); err == nil && len(art.GetSeedPeers()) > 0 {
-			for _, h := range missingHashes {
-				peerLocations[h] = art.GetSeedPeers()
-			}
-		}
-		resp, err := e.trackerClient.LocateChunks(locateCtx, &proto.LocateChunksRequest{
-			RequesterNodeId: e.nodeID,
-			ChunkHashes:     missingHashes,
-		})
-		cancel()
-		if err != nil {
-			slog.Warn("LocateChunks failed; origin fallback", "err", err)
-		} else {
-			for _, loc := range resp.GetLocations() {
-				if len(loc.GetPeers()) > 0 {
-					peerLocations[loc.GetChunkHash()] = loc.GetPeers()
+		go func() {
+			t := time.NewTicker(e.discoverEvery)
+			defer t.Stop()
+			for {
+				select {
+				case <-refreshCtx.Done():
+					return
+				case <-t.C:
+					remaining := make([]string, 0, len(missingHashes))
+					for _, h := range missingHashes {
+						if !e.cache.HasChunk(h) {
+							remaining = append(remaining, h)
+						}
+					}
+					if len(remaining) == 0 {
+						return
+					}
+					e.refreshLocations(refreshCtx, manifest.ArtifactID, remaining, locs)
+					locs.updateSwarmMetrics(remaining)
 				}
 			}
-		}
+		}()
 	}
 
+	ad := advertise.New(e.trackerClient, e.nodeID, e.advertiseCfg)
+	defer ad.Stop()
+	ad.Reconcile(cache.ManifestCachedHashes(e.cache, manifest))
+
 	if len(missingItems) > 0 {
-		order := scheduler.RarestFirst(missingHashes, peerLocations)
-		sem := make(chan struct{}, e.maxPeerWorkers)
 		var wg sync.WaitGroup
 		var downloadErr atomic.Value
-		var newlyAcquiredHashes []string
-		var reportMu sync.Mutex
+		var assigned sync.Map // addr -> *int64
 
-		for _, hash := range order {
-			if ctx.Err() != nil {
-				downloadErr.Store(ctx.Err())
-				break
-			}
-			if downloadErr.Load() != nil {
-				break
-			}
-			work := hashToWork[hash]
+		pending := newPendingQueue(missingItems)
+
+		for i := 0; i < e.maxPeerWorkers; i++ {
 			wg.Add(1)
-			sem <- struct{}{}
-			go func(work chunkWorkItem) {
+			go func() {
 				defer wg.Done()
-				defer func() { <-sem }()
-				if ctx.Err() != nil {
-					downloadErr.Store(ctx.Err())
-					return
-				}
-				if downloadErr.Load() != nil {
-					return
-				}
-
-				candidates := e.scheduler.RankPeers(e.locality, peerLocations[work.hash])
-				var downloadedBytes []byte
-				var isFromPeer bool
-
-				for _, p := range candidates {
-					addr := p.GetAddress()
-					if addr == "" || e.scheduler.IsUntrusted(addr) {
-						continue
+				for {
+					if ctx.Err() != nil {
+						downloadErr.Store(ctx.Err())
+						return
 					}
-					if !e.scheduler.WaitBegin(ctx, addr) {
-						continue
+					if downloadErr.Load() != nil {
+						return
 					}
-					peerCtx, peerCancel := context.WithTimeout(ctx, 10*time.Second)
-					start := time.Now()
-					data, fetchErr := e.clientPool.DownloadChunk(peerCtx, addr, work.hash)
-					peerCancel()
-					ok := fetchErr == nil
-					e.scheduler.End(addr, time.Since(start), ok)
+					work, ok := pending.next(locs)
 					if !ok {
-						slog.Warn("p2p download failed", "peer", p.GetNodeId(), "addr", addr, "chunk", work.hash, "err", fetchErr)
-						if fetchErr != nil && (errors.Is(fetchErr, context.DeadlineExceeded) || containsCorrupt(fetchErr)) {
-							metrics.ChunkVerifyFailures.Inc()
-						}
-						continue
-					}
-					downloadedBytes = data
-					isFromPeer = true
-					break
-				}
-
-				if !isFromPeer || len(downloadedBytes) == 0 {
-					if origin == nil {
-						downloadErr.Store(fmt.Errorf("no peer available for chunk %s and no origin configured", work.hash))
 						return
 					}
-					originCtx, originCancel := context.WithTimeout(ctx, 30*time.Second)
-					data, fetchErr := origin.ReadChunk(originCtx, work.filePath, work.offset, work.size)
-					originCancel()
-					if fetchErr != nil {
-						downloadErr.Store(fmt.Errorf("failed to fetch chunk %s from origin (%s offset %d): %w", work.hash, work.filePath, work.offset, fetchErr))
+					fromPeer, n, err := e.fetchChunk(ctx, work, origin, locs, &assigned)
+					if err != nil {
+						downloadErr.Store(err)
 						return
 					}
-					downloadedBytes = data
-				}
-
-				if err := e.cache.PutChunk(work.hash, downloadedBytes); err != nil {
-					if errors.Is(err, cache.ErrHashMismatch) {
-						metrics.ChunkVerifyFailures.Inc()
-						downloadErr.Store(fmt.Errorf("integrity check failed for chunk %s: %w", work.hash, err))
-						return
+					atomic.AddInt64(&job.DownloadedChunks, 1)
+					if fromPeer {
+						atomic.AddInt64(&job.PeerChunks, 1)
+						atomic.AddInt64(&job.PeerBytes, n)
+						metrics.PeerBytesTransferred.Add(float64(n))
+						metrics.PeerBytesDownloaded.Add(float64(n))
+						metrics.OriginBytesAvoided.Add(float64(n))
+						metrics.OriginBytesSaved.Add(float64(n))
+					} else {
+						atomic.AddInt64(&job.OriginChunks, 1)
+						atomic.AddInt64(&job.OriginBytes, n)
+						metrics.OriginBytesDownloaded.Add(float64(n))
 					}
-					downloadErr.Store(fmt.Errorf("failed to commit chunk %s to cache: %w", work.hash, err))
-					return
+					ad.Enqueue(work.hash)
 				}
-
-				chunkSize := int64(len(downloadedBytes))
-				atomic.AddInt64(&job.DownloadedChunks, 1)
-				if isFromPeer {
-					atomic.AddInt64(&job.PeerChunks, 1)
-					atomic.AddInt64(&job.PeerBytes, chunkSize)
-					metrics.PeerBytesTransferred.Add(float64(chunkSize))
-					metrics.OriginBytesSaved.Add(float64(chunkSize))
-				} else {
-					atomic.AddInt64(&job.OriginChunks, 1)
-					atomic.AddInt64(&job.OriginBytes, chunkSize)
-					metrics.OriginBytesDownloaded.Add(float64(chunkSize))
-				}
-				reportMu.Lock()
-				newlyAcquiredHashes = append(newlyAcquiredHashes, work.hash)
-				reportMu.Unlock()
-			}(work)
+			}()
 		}
 		wg.Wait()
 
@@ -305,15 +445,6 @@ func (e *Engine) Sync(ctx context.Context, jobID string, manifest *v1.ArtifactMa
 			job.Status = "FAILED"
 			job.ErrorMessage = fmt.Sprintf("%v", errVal)
 			return nil, errVal.(error)
-		}
-
-		if e.trackerClient != nil && len(newlyAcquiredHashes) > 0 {
-			reportCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			_, _ = e.trackerClient.ReportChunks(reportCtx, &proto.ReportChunksRequest{
-				NodeId:      e.nodeID,
-				ChunkHashes: newlyAcquiredHashes,
-			})
-			cancel()
 		}
 	}
 
@@ -346,10 +477,236 @@ func (e *Engine) Sync(ctx context.Context, jobID string, manifest *v1.ArtifactMa
 		SkippedChunks:    job.SkippedChunks,
 		PeerBytes:        job.PeerBytes,
 		OriginBytes:      job.OriginBytes,
+		CacheBytesReused: cacheBytesReused,
 		Duration:         duration,
+	}
+	if job.OriginBytes > 0 {
+		metrics.SwarmAmplificationRatio.Set(float64(job.PeerBytes) / float64(job.OriginBytes))
+	} else if job.PeerBytes > 0 {
+		metrics.SwarmAmplificationRatio.Set(float64(job.PeerBytes))
 	}
 	slog.Info("sync completed", "artifact", manifest.Name, "version", manifest.Version, "summary", m.FormatSummary())
 	return m, nil
+}
+
+func (e *Engine) refreshLocations(ctx context.Context, artifactID string, hashes []string, locs *locationMap) {
+	if e.trackerClient == nil || len(hashes) == 0 {
+		return
+	}
+	locateCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	if art, err := e.trackerClient.LocateArtifact(locateCtx, &proto.LocateArtifactRequest{
+		RequesterNodeId: e.nodeID,
+		ArtifactId:      artifactID,
+	}); err == nil && len(art.GetSeedPeers()) > 0 {
+		for _, h := range hashes {
+			locs.replace(h, art.GetSeedPeers())
+		}
+	}
+	resp, err := e.trackerClient.LocateChunks(locateCtx, &proto.LocateChunksRequest{
+		RequesterNodeId: e.nodeID,
+		ChunkHashes:     hashes,
+	})
+	if err != nil {
+		slog.Warn("LocateChunks failed; origin fallback", "err", err)
+		return
+	}
+	for _, loc := range resp.GetLocations() {
+		locs.replace(loc.GetChunkHash(), loc.GetPeers())
+	}
+}
+
+func loadAssigned(m *sync.Map, addr string) int64 {
+	v, _ := m.LoadOrStore(addr, new(int64))
+	return atomic.LoadInt64(v.(*int64))
+}
+
+func addAssigned(m *sync.Map, addr string, delta int64) {
+	v, _ := m.LoadOrStore(addr, new(int64))
+	atomic.AddInt64(v.(*int64), delta)
+}
+
+func (e *Engine) fetchChunk(ctx context.Context, work chunkWorkItem, origin source.Source, locs *locationMap, assigned *sync.Map) (fromPeer bool, bytes int64, err error) {
+	backoff := e.retryInitial
+	for attempt := 0; attempt < e.retryAttempts; attempt++ {
+		candidates := e.scheduler.RankPeers(e.locality, locs.get(work.hash))
+		sortByAssigned(candidates, assigned)
+		for _, p := range candidates {
+			addr := p.GetAddress()
+			if addr == "" || e.scheduler.IsUntrusted(addr) {
+				continue
+			}
+			if !e.scheduler.Begin(addr) {
+				continue
+			}
+			addAssigned(assigned, addr, 1)
+			peerCtx, peerCancel := context.WithTimeout(ctx, 30*time.Second)
+			start := time.Now()
+			n, fetchErr := e.downloadFromPeer(peerCtx, addr, work.hash)
+			peerCancel()
+			addAssigned(assigned, addr, -1)
+			ok := fetchErr == nil
+			e.scheduler.End(addr, n, time.Since(start), ok)
+			if !ok {
+				slog.Warn("p2p download failed", "peer", p.GetNodeId(), "addr", addr, "chunk", work.hash, "err", fetchErr)
+				if fetchErr != nil && (errors.Is(fetchErr, context.DeadlineExceeded) || containsCorrupt(fetchErr)) {
+					metrics.ChunkVerifyFailures.Inc()
+				}
+				if e.scheduler.IsUntrusted(addr) {
+					e.clientPool.RemovePeer(addr)
+				}
+				continue
+			}
+			return true, n, nil
+		}
+		if attempt+1 < e.retryAttempts {
+			select {
+			case <-ctx.Done():
+				return false, 0, ctx.Err()
+			case <-time.After(backoff):
+			}
+			if backoff < e.retryMax {
+				backoff *= 2
+				if backoff > e.retryMax {
+					backoff = e.retryMax
+				}
+			}
+		}
+	}
+
+	if origin == nil {
+		return false, 0, fmt.Errorf("no peer available for chunk %s and no origin configured", work.hash)
+	}
+	n, err := e.downloadFromOrigin(ctx, work, origin)
+	if err != nil {
+		return false, 0, err
+	}
+	return false, n, nil
+}
+
+func sortByAssigned(peers []*proto.PeerInfo, assigned *sync.Map) {
+	if len(peers) < 2 {
+		return
+	}
+	// insertion sort to keep RankPeers order for ties
+	for i := 1; i < len(peers); i++ {
+		j := i
+		for j > 0 && loadAssigned(assigned, peers[j].Address) < loadAssigned(assigned, peers[j-1].Address) {
+			peers[j], peers[j-1] = peers[j-1], peers[j]
+			j--
+		}
+	}
+}
+
+func (e *Engine) downloadFromPeer(ctx context.Context, addr, hash string) (int64, error) {
+	offset := e.cache.PartialSize(hash)
+	pr, pw := io.Pipe()
+	var total int64
+	var dlErr error
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		total, dlErr = e.clientPool.DownloadChunkTo(ctx, addr, hash, offset, pw)
+		if dlErr != nil {
+			_ = pw.CloseWithError(dlErr)
+			return
+		}
+		_ = pw.Close()
+	}()
+	appendErr := e.cache.AppendPartial(hash, pr)
+	<-done
+	if dlErr != nil {
+		if containsCorrupt(dlErr) || errors.Is(dlErr, cache.ErrHashMismatch) {
+			_ = e.cache.DiscardPartial(hash)
+		}
+		return 0, dlErr
+	}
+	if appendErr != nil {
+		return 0, appendErr
+	}
+	got := e.cache.PartialSize(hash)
+	if total > 0 && got < total {
+		return 0, fmt.Errorf("%w: have %d want %d", cache.ErrIncomplete, got, total)
+	}
+	if err := e.cache.CommitPartial(hash); err != nil {
+		if errors.Is(err, cache.ErrHashMismatch) {
+			metrics.ChunkVerifyFailures.Inc()
+			_ = e.cache.DiscardPartial(hash)
+		}
+		return 0, err
+	}
+	if total <= 0 {
+		total = got
+	}
+	return total, nil
+}
+
+func (e *Engine) acquireOrigin(ctx context.Context) error {
+	select {
+	case e.originSem <- struct{}{}:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func (e *Engine) releaseOrigin() {
+	<-e.originSem
+}
+
+func (e *Engine) downloadFromOrigin(ctx context.Context, work chunkWorkItem, origin source.Source) (int64, error) {
+	if err := e.acquireOrigin(ctx); err != nil {
+		return 0, err
+	}
+	defer e.releaseOrigin()
+
+	partial := e.cache.PartialSize(work.hash)
+	remain := work.size - partial
+	if remain < 0 {
+		_ = e.cache.DiscardPartial(work.hash)
+		partial = 0
+		remain = work.size
+	}
+	originCtx, originCancel := context.WithTimeout(ctx, 30*time.Second)
+	defer originCancel()
+
+	pr, pw := io.Pipe()
+	var total int64
+	var fetchErr error
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		total, fetchErr = origin.ReadChunkTo(originCtx, work.filePath, work.offset+partial, remain, pw)
+		if fetchErr != nil {
+			_ = pw.CloseWithError(fmt.Errorf("failed to fetch chunk %s from origin (%s offset %d): %w", work.hash, work.filePath, work.offset, fetchErr))
+			return
+		}
+		_ = pw.Close()
+	}()
+	appendErr := e.cache.AppendPartial(work.hash, pr)
+	<-done
+	if fetchErr != nil {
+		return 0, fetchErr
+	}
+	if appendErr != nil {
+		return 0, appendErr
+	}
+	got := e.cache.PartialSize(work.hash)
+	if total > 0 && got < total {
+		return 0, fmt.Errorf("%w: have %d want %d", cache.ErrIncomplete, got, total)
+	}
+	if err := e.cache.CommitPartial(work.hash); err != nil {
+		if errors.Is(err, cache.ErrHashMismatch) {
+			metrics.ChunkVerifyFailures.Inc()
+			_ = e.cache.DiscardPartial(work.hash)
+			return 0, fmt.Errorf("integrity check failed for chunk %s: %w", work.hash, err)
+		}
+		return 0, fmt.Errorf("failed to commit chunk %s to cache: %w", work.hash, err)
+	}
+	if total <= 0 {
+		total = got
+	}
+	return total, nil
 }
 
 func containsCorrupt(err error) bool {

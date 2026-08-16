@@ -1,7 +1,7 @@
 # Distributed Artifact Fabric — Master Phased Architecture Plan
 
-**Version:** 1.2  
-**Status:** Phase 1 complete; Phase 2 largely implemented — **project still early / not production-ready**  
+**Version:** 1.3  
+**Status:** Phase 1 and Phase 2 complete — **project still early / not production-ready**  
 **Product name:** **Spider**
 
 This document is the master index for phase plans in `docs/plans/`.
@@ -44,7 +44,7 @@ graph TD
 | Phase | Plan Document | Core Focus | Key Deliverables |
 |---|---|---|---|
 | **Phase 1** | [phase-1-poc-and-podman-environment.md](phase-1-poc-and-podman-environment.md) | PoC Engine & Podman Testbed | Core Go packages, gRPC streaming, tracker, `spiderd`/`spiderctl`, 6 E2E experiments. **Complete.** |
-| **Phase 2** | [phase-2-core-reliability-and-hardening.md](phase-2-core-reliability-and-hardening.md) | Reliability & Hardening | Pluggable Store+Cache (SQLite/Postgres + memory/Redis), compact seed ads, swarm scheduler, refcounted LRU + pins, Prometheus/`client_golang`, YAML. **Largely implemented; validation ongoing.** |
+| **Phase 2** | [phase-2-core-reliability-and-hardening.md](phase-2-core-reliability-and-hardening.md) | Reliability & Hardening | Pluggable Store+metaCache (SQLite/Postgres + memory/Redis/none), compact seed ads, swarm scheduler, streaming `ChunkStore`, Prometheus/`client_golang`, YAML. **Complete.** |
 | **Phase 3** | [phase-3-security-and-authorization.md](phase-3-security-and-authorization.md) | Enterprise Security | mTLS, Ed25519 signed manifests, RBAC. Path-join guard is implemented in Phase 2; Phase 3 adds symlink policy and auth. |
 | **Phase 4** | [phase-4-kubernetes-operator-and-crds.md](phase-4-kubernetes-operator-and-crds.md) | Kubernetes Integration | `ArtifactDeployment` CRD, controller, DaemonSet. |
 | **Phase 5** | [phase-5-multi-region-scale-and-transports.md](phase-5-multi-region-scale-and-transports.md) | Scale & Advanced Transports | Regional federation, `splice`/sendfile, FastCDC. Compact seed ads ship in Phase 2. |
@@ -87,7 +87,9 @@ Default materialization is **copy**; hardlink is optional when cache and dest sh
 6. **Pluggable Store / Cache / Source** — drivers selected by config
 7. **Local Testing Engine** — Podman Compose; see [docs/benchmarks.md](../benchmarks.md) for interpretation caveats (same-host runs measure origin savings, not production wall-clock).
 
-**Benchmarks (2026-08-15):** Compose 500 MB × 3 workers — 100% origin bytes saved, ~0.96× wall clock on one machine. Multi-host fleet benchmark pending.
+**Phase 2.5 (in progress):** Node-wide upload bandwidth (`golang.org/x/time/rate`), EWMA throughput scheduling, stale peer reconciliation, retryable chunk advertisement, expanded Prometheus metrics, gRPC connection lifecycle. Multi-host fleet benchmark pending.
+
+**Benchmarks (2026-08-16):** In-process 500 MB × 6 — 100% origin saved; compose 500 MB × 3 — 100% origin saved, ~1.07× wall clock on one machine.
 
 ---
 

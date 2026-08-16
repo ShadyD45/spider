@@ -1,6 +1,7 @@
 package source
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -106,28 +107,36 @@ func (fs *FilesystemSource) ListFiles(ctx context.Context, prefix string) ([]Fil
 
 // ReadChunk reads a byte slice from a file.
 func (fs *FilesystemSource) ReadChunk(ctx context.Context, path string, offset int64, size int64) ([]byte, error) {
-	full, err := fs.resolve(path)
+	var buf bytes.Buffer
+	n, err := fs.ReadChunkTo(ctx, path, offset, size, &buf)
 	if err != nil {
 		return nil, err
+	}
+	return buf.Bytes()[:n], nil
+}
+
+// ReadChunkTo streams a byte range from a file into w.
+func (fs *FilesystemSource) ReadChunkTo(ctx context.Context, path string, offset int64, size int64, w io.Writer) (int64, error) {
+	full, err := fs.resolve(path)
+	if err != nil {
+		return 0, err
 	}
 
 	f, err := os.Open(full)
 	if err != nil {
-		return nil, fmt.Errorf("failed to open source file %s: %w", path, err)
+		return 0, fmt.Errorf("failed to open source file %s: %w", path, err)
 	}
 	defer f.Close()
 
 	if _, err := f.Seek(offset, io.SeekStart); err != nil {
-		return nil, fmt.Errorf("failed to seek in source file %s to %d: %w", path, offset, err)
+		return 0, fmt.Errorf("failed to seek in source file %s to %d: %w", path, offset, err)
 	}
 
-	buf := make([]byte, size)
-	n, err := io.ReadFull(f, buf)
+	n, err := io.CopyN(w, f, size)
 	if err != nil && err != io.EOF && err != io.ErrUnexpectedEOF {
-		return nil, fmt.Errorf("failed to read %d bytes from %s: %w", size, path, err)
+		return n, fmt.Errorf("failed to read %d bytes from %s: %w", size, path, err)
 	}
-
-	return buf[:n], nil
+	return n, nil
 }
 
 // Open returns a streaming reader for a file.

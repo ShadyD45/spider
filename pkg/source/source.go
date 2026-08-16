@@ -23,6 +23,9 @@ type Source interface {
 	// ReadChunk reads a byte slice from path starting at offset with specified size.
 	ReadChunk(ctx context.Context, path string, offset int64, size int64) ([]byte, error)
 
+	// ReadChunkTo streams size bytes from path at offset into w without an intermediate buffer.
+	ReadChunkTo(ctx context.Context, path string, offset int64, size int64, w io.Writer) (int64, error)
+
 	// Open returns a full streaming reader for the given path.
 	Open(ctx context.Context, path string) (io.ReadCloser, error)
 }

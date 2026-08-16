@@ -144,3 +144,61 @@ func TestCacheManifestPersistence(t *testing.T) {
 		t.Fatalf("Manifest mismatch: %+v vs %+v", loaded, m)
 	}
 }
+
+func TestPartialResumeAndHashMismatch(t *testing.T) {
+	c, err := NewChunkStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	full := []byte("0123456789abcdef0123456789abcdef")
+	h := hashOf(full)
+	if err := c.AppendPartial(h, bytes.NewReader(full[:10])); err != nil {
+		t.Fatal(err)
+	}
+	if c.HasChunk(h) {
+		t.Fatal("partial must not be advertised as present")
+	}
+	if c.PartialSize(h) != 10 {
+		t.Fatalf("partial size %d", c.PartialSize(h))
+	}
+	if err := c.AppendPartial(h, bytes.NewReader(full[10:])); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.CommitPartial(h); err != nil {
+		t.Fatal(err)
+	}
+	if !c.HasChunk(h) {
+		t.Fatal("expected committed chunk")
+	}
+	if c.PartialSize(h) != 0 {
+		t.Fatal("partial should be gone after commit")
+	}
+
+	bad := hashOf([]byte("other"))
+	_ = c.AppendPartial(bad, bytes.NewReader(full))
+	if err := c.CommitPartial(bad); !errors.Is(err, ErrHashMismatch) {
+		t.Fatalf("expected mismatch, got %v", err)
+	}
+	if c.HasChunk(bad) {
+		t.Fatal("mismatch must not commit")
+	}
+}
+
+func TestHasChunkDuringWrite(t *testing.T) {
+	c, err := NewChunkStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	data := bytes.Repeat([]byte("x"), 64*1024)
+	h := hashOf(data)
+	done := make(chan error, 1)
+	go func() {
+		done <- c.PutChunkFromReader(h, bytes.NewReader(data))
+	}()
+	for i := 0; i < 50; i++ {
+		_ = c.HasChunk(h)
+	}
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+}

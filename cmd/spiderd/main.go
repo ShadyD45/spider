@@ -15,6 +15,7 @@ import (
 
 	v1 "spider/api/v1"
 	"spider/api/v1/proto"
+	"spider/pkg/advertise"
 	"spider/pkg/cache"
 	"spider/pkg/config"
 	"spider/pkg/engine"
@@ -31,8 +32,8 @@ import (
 type daemonSyncHandler struct {
 	nodeID string
 	eng    *engine.Engine
-	cache  *cache.Cache
-	mgr    *cache.Manager
+	cache  *cache.ChunkStore
+	mgr    *cache.QuotaManager
 	s3     source.S3Config
 	runCtx context.Context
 }
@@ -149,21 +150,21 @@ func main() {
 		cfg.HTTPAddr = cfg.Node.HTTPAddr
 	}
 	if *cacheDir != "" {
-		cfg.DiskCache.Dir = *cacheDir
+		cfg.ChunkCache.Dir = *cacheDir
 	}
 	logging.SetDefault(cfg.LogFormat)
 
-	c, err := cache.NewCache(cfg.DiskCache.Dir)
+	c, err := cache.NewChunkStore(cfg.ChunkCache.Dir)
 	if err != nil {
-		slog.Error("cache init", "err", err)
+		slog.Error("chunk store init", "err", err)
 		os.Exit(1)
 	}
-	mgr, err := cache.NewManager(c, cfg.DiskCache.MaxBytes, cfg.DiskCache.LowWatermark, cfg.DiskCache.HighWatermark)
+	mgr, err := cache.NewQuotaManager(c, cfg.ChunkCache.MaxBytes, cfg.ChunkCache.LowWatermark, cfg.ChunkCache.HighWatermark)
 	if err != nil {
-		slog.Error("cache manager", "err", err)
+		slog.Error("chunk quota manager", "err", err)
 		os.Exit(1)
 	}
-	for _, id := range cfg.DiskCache.PinnedArtifacts {
+	for _, id := range cfg.ChunkCache.PinnedArtifacts {
 		if mf, err := c.GetManifest(id); err == nil {
 			_ = mgr.Pin(mf)
 			slog.Info("reconciled pin", "artifact", id)
@@ -191,15 +192,23 @@ func main() {
 		advAddress = fmt.Sprintf("%s:%d", *nodeID, *port)
 	}
 
-	clientPool := peer.NewClientPool()
+	clientPool := peer.NewClientPoolWithConfig(peer.PoolConfig{
+		MaxConnections: cfg.PeerClient.MaxConnections,
+		IdleTimeout:    cfg.PeerClient.IdleTimeout,
+	})
 	eng := engine.NewEngine(engine.Config{
-		NodeID:        *nodeID,
-		Locality:      loc,
-		Cache:         c,
-		TrackerClient: trackerClient,
-		ClientPool:    clientPool,
-		Materializer:  materializer.NewMaterializer(materializer.DefaultOptions()),
-		Scheduler:     scheduler.New(8),
+		NodeID:             *nodeID,
+		Locality:           loc,
+		Cache:              c,
+		TrackerClient:      trackerClient,
+		ClientPool:         clientPool,
+		Materializer:       materializer.NewMaterializer(materializer.DefaultOptions()),
+		Scheduler:          scheduler.New(cfg.Download.MaxConcurrency),
+		MaxPeerConcurrency:   cfg.Download.MaxConcurrency,
+		MaxOriginConcurrency: cfg.Origin.MaxConcurrency,
+		Advertisement:        cfg.Advertisement,
+		PeerDiscovery:      cfg.PeerDiscovery,
+		Retry:              cfg.Retry,
 	})
 
 	s3Cfg := source.S3Config{
@@ -207,9 +216,29 @@ func main() {
 		AccessKey: *s3AccessKey, SecretKey: *s3SecretKey, UsePathStyle: true,
 	}
 	handler := &daemonSyncHandler{nodeID: *nodeID, eng: eng, cache: c, mgr: mgr, s3: s3Cfg, runCtx: runCtx}
-	peerServer := peer.NewServer(*nodeID, c, handler)
+	var chunkAdvertiser *advertise.Advertiser
+	if trackerClient != nil {
+		chunkAdvertiser = advertise.New(trackerClient, *nodeID, cfg.Advertisement)
+	}
+	peerServer := peer.NewServerWithLimits(*nodeID, c, handler, peer.UploadLimits{
+		MaxConcurrency:   cfg.Upload.MaxConcurrency,
+		MaxQueueSize:     cfg.Upload.MaxQueueSize,
+		MaxBandwidthMbps: cfg.Upload.MaxBandwidthMbps,
+	})
 
-	httpSrv := httpserver.Start(cfg.HTTPAddr, func(context.Context) error { return nil })
+	httpSrv := httpserver.Start(cfg.HTTPAddr, func(ctx context.Context) error {
+		dir := cfg.ChunkCache.Dir
+		if err := os.MkdirAll(dir, 0755); err != nil {
+			return err
+		}
+		f, err := os.CreateTemp(dir, ".ready-*")
+		if err != nil {
+			return err
+		}
+		name := f.Name()
+		_ = f.Close()
+		return os.Remove(name)
+	})
 
 	if trackerClient != nil {
 		go func() {
@@ -223,11 +252,9 @@ func main() {
 			} else {
 				slog.Info("registered with tracker", "node", *nodeID, "addr", advAddress)
 			}
-			existingChunks, _ := c.ListChunks()
-			if len(existingChunks) > 0 {
-				repCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-				_, _ = trackerClient.ReportChunks(repCtx, &proto.ReportChunksRequest{NodeId: *nodeID, ChunkHashes: existingChunks})
-				cancel()
+			existingChunks, _ := cache.StartupReconcileHashes(c, cfg.ChunkCache.PinnedArtifacts)
+			if len(existingChunks) > 0 && chunkAdvertiser != nil {
+				chunkAdvertiser.Reconcile(existingChunks)
 			}
 			ticker := time.NewTicker(5 * time.Second)
 			defer ticker.Stop()
@@ -252,6 +279,9 @@ func main() {
 	go func() {
 		<-runCtx.Done()
 		slog.Info("shutting down spiderd")
+		if chunkAdvertiser != nil {
+			chunkAdvertiser.Stop()
+		}
 		_ = httpSrv.Shutdown(context.Background())
 		peerServer.Stop()
 		clientPool.Close()
@@ -262,7 +292,7 @@ func main() {
 		os.Exit(0)
 	}()
 
-	slog.Info("spiderd listening", "node", *nodeID, "port", *port, "cache", cfg.DiskCache.Dir)
+	slog.Info("spiderd listening", "node", *nodeID, "port", *port, "chunkCache", cfg.ChunkCache.Dir)
 	if err := peerServer.Start(*port); err != nil {
 		slog.Error("peer server", "err", err)
 		os.Exit(1)

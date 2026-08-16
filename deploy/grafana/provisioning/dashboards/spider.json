@@ -13,7 +13,7 @@
       "gridPos": { "h": 5, "w": 6, "x": 0, "y": 0 },
       "id": 1,
       "options": { "colorMode": "background", "graphMode": "area", "reduceOptions": { "calcs": ["lastNotNull"] } },
-      "targets": [{ "expr": "spider_origin_bytes_saved_total", "legendFormat": "saved", "refId": "A" }],
+      "targets": [{ "expr": "spider_origin_bytes_avoided_total", "legendFormat": "avoided", "refId": "A" }],
       "title": "Origin bytes saved",
       "type": "stat"
     },
@@ -56,7 +56,7 @@
       "targets": [
         { "expr": "rate(spider_peer_bytes_transferred_total[1m])", "legendFormat": "peer", "refId": "A" },
         { "expr": "rate(spider_origin_bytes_downloaded_total[1m])", "legendFormat": "origin", "refId": "B" },
-        { "expr": "rate(spider_origin_bytes_saved_total[1m])", "legendFormat": "saved vs origin", "refId": "C" }
+        { "expr": "rate(spider_origin_bytes_avoided_total[1m])", "legendFormat": "avoided vs origin", "refId": "C" }
       ],
       "title": "Transfer mix (bytes/sec)",
       "type": "timeseries"

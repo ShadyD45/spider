@@ -14,6 +14,7 @@ import (
 type Registry struct {
 	store      store.Store
 	peerExpiry time.Duration
+	fleet      *FleetWatch
 }
 
 func NewRegistry(peerExpiry time.Duration) *Registry {
@@ -27,7 +28,7 @@ func NewRegistryWithStore(st store.Store, peerExpiry time.Duration) *Registry {
 	if st == nil {
 		st = store.NewMemory()
 	}
-	return &Registry{store: st, peerExpiry: peerExpiry}
+	return &Registry{store: st, peerExpiry: peerExpiry, fleet: NewFleetWatch()}
 }
 
 func (r *Registry) Store() store.Store { return r.store }
@@ -87,13 +88,27 @@ func (r *Registry) ReportArtifact(ctx context.Context, nodeID, artifactID string
 	defer cancel()
 	if err := r.store.ReportSeed(ctx, artifactID, nodeID); err != nil {
 		slog.Error("report artifact seed", "node", nodeID, "artifact", artifactID, "err", err)
+		return
+	}
+	if r.fleet != nil {
+		r.fleet.NodeReady(artifactID, nodeID)
 	}
 }
 
 func (r *Registry) PutArtifact(ctx context.Context, rec store.ArtifactRecord) error {
 	ctx, cancel := r.bind(ctx)
 	defer cancel()
-	return r.store.PutArtifact(ctx, rec)
+	if err := r.store.PutArtifact(ctx, rec); err != nil {
+		return err
+	}
+	if r.fleet != nil {
+		expected := len(r.ListActivePeers(ctx))
+		if expected <= 0 {
+			expected = 1
+		}
+		r.fleet.BeginDistribution(rec.ArtifactID, expected)
+	}
+	return nil
 }
 
 func (r *Registry) LocateChunks(ctx context.Context, requesterNodeID string, chunkHashes []string) []*proto.ChunkLocation {

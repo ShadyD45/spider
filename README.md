@@ -9,7 +9,9 @@
 [![Architecture](https://img.shields.io/badge/Architecture-P2P%20Mesh-orange.svg)](#architecture)
 [![Status](https://img.shields.io/badge/Status-Early%20Development-yellow.svg)](#project-status)
 
-> **Project status:** Spider is in **early development** — Phase 2 hardening is largely implemented, but the project is **not production-ready**. APIs, config, and ops paths may change. Use for evaluation, benchmarking, and contribution only.
+> **Project status:** Spider is in **early development** — **Phase 2 + 2.5 are complete**, but the project is **not production-ready**. APIs, config, and ops paths may change. Use for evaluation, benchmarking, and contribution only.
+
+**Configuration & tuning:** **[docs/configuration.md](docs/configuration.md)** · **Architecture (detailed):** **[docs/architecture.md](docs/architecture.md)**
 
 **Spider** is a high-throughput, content-addressed, topology-aware P2P distribution mesh designed to distribute massive immutable artifacts (LLM/ML models, datasets, binaries, containers, and directory trees) across large compute fleets while drastically reducing origin storage (S3/MinIO) network traffic.
 
@@ -19,13 +21,13 @@
 
 Latest recorded numbers and methodology: **[docs/benchmarks.md](docs/benchmarks.md)**.
 
-| Mode | What it measures | Recorded on this host (2026-08-15) |
+| Mode | What it measures | Recorded on this host (2026-08-16) |
 | :--- | :--- | :--- |
-| Micro (Go `bench`) | Chunker, SHA-256, cache Put | 631–1143 MB/s compute; ~67 MB/s atomic cache Put |
-| In-process loopback | Engine regression, 500 MB × 6 workers | **94.9% origin saved**; ~0.78× wall clock vs direct origin |
-| Compose fleet | Real `spiderd` + tracker + Grafana, 500 MB × 3 workers | **100% origin saved**; ~0.96× wall clock vs direct origin |
+| Micro (Go `bench`) | Chunker, SHA-256, cache Put | 301–374 MB/s compute; ~25 MB/s atomic cache Put |
+| In-process loopback | Engine regression, 500 MB × 6 workers | **100% origin saved**; ~0.40× wall clock vs direct origin |
+| Compose fleet | Real `spiderd` + tracker + Grafana, 500 MB × 3 workers | **100% origin saved**; ~1.07× wall clock vs direct origin |
 
-**Do not read wall-clock alone as “Spider is slower/faster.”** On a single machine (loopback or Podman on one host), origin is already a fast local bind mount — P2P adds gRPC, tracker, and verification overhead without cross-network savings. The primary metric is **origin-byte reduction** (`origin_bytes_saved`, Prometheus `spider_origin_bytes_downloaded_total` vs `spider_peer_bytes_transferred_total`).
+**Do not read wall-clock alone as “Spider is slower/faster.”** On a single machine (loopback or Podman on one host), origin is already a fast local bind mount — P2P adds gRPC, tracker, and verification overhead without cross-network savings. The primary metric is **origin-byte reduction** (`spider_origin_bytes_avoided_total` = peer + cache reuse; see `spider_origin_bytes_downloaded_total` vs `spider_peer_bytes_transferred_total`).
 
 **Pending:** Multi-machine benchmark on a **real worker fleet** with a remote seed and origin (separate hosts or AZs). Same-host compose results are useful for correctness and Grafana demos, not for predicting production wall-clock speedup. See [docs/benchmarks.md](docs/benchmarks.md#limitations-of-the-current-testbed).
 
@@ -33,46 +35,67 @@ Grafana (after compose benchmark; on Podman Desktop for Windows use the [Podman 
 
 ---
 
-## 🏗️ System Architecture
+## System Architecture
 
-```text
-       External Origin Storage (S3 / MinIO / Local FS)
-                             │
-                             ▼
-                 Spider Canonical Manifest
-                  (JSON + SHA-256 Identity)
-                             │
-                             ▼
-               Fixed Content Chunks (4 MiB)
-                             │
-                             ▼
-         Content-Addressed Local Cache (/var/lib/spider/chunks)
-                             │
-            ┌────────────────┴────────────────┐
-            ▼                                 ▼
-   Distributed Peer Mesh           Materialized Directory Tree
-   (gRPC Chunk Streaming)            (POSIX View for Apps/Inference)
-            │
-            ▼
-   Central Tracker (metadata only)
-   Store: SQLite / Postgres  |  Cache: memory / Redis
-   /metrics /healthz /readyz  |  YAML config (spider.yaml)
+Spider separates **control plane** (metadata only) from **data plane** (chunk bytes). The tracker never proxies artifact payload; workers stream directly peer-to-peer or from origin.
+
+```mermaid
+flowchart TB
+  subgraph origin_layer [Origin Layer]
+    Origin["Origin Storage\nS3 / MinIO / Local FS"]
+  end
+
+  subgraph control_plane [Control Plane — metadata only]
+    Tracker["tracker"]
+    Store[("store\nSQLite / Postgres")]
+    MetaCache[("metaCache\nmemory / Redis")]
+    Tracker --> Store
+    Tracker --> MetaCache
+  end
+
+  subgraph data_plane [Data Plane — bytes never through tracker]
+    SpiderdA["spiderd worker A"]
+    SpiderdB["spiderd worker B"]
+    SpiderdC["spiderd worker C"]
+    SpiderdA <-->|"gRPC P2P mesh"| SpiderdB
+    SpiderdB <-->|"gRPC P2P mesh"| SpiderdC
+  end
+
+  subgraph clients [Operators]
+    Spiderctl["spiderctl"]
+  end
+
+  Origin -->|"fallback"| SpiderdA
+  Spiderctl --> Tracker
+  SpiderdA --> Tracker
+  SpiderdB --> Tracker
+  SpiderdC --> Tracker
+  Spiderctl --> SpiderdA
 ```
 
-### Phase 2 design (current)
+**Detailed diagrams** (sync lifecycle, component map, chunk data path, scheduler): **[docs/architecture.md](docs/architecture.md)**
 
-| Layer | Package / binary | Role |
-| :--- | :--- | :--- |
-| **Config** | `pkg/config`, `spider.yaml` | Store/cache drivers, pool tuning, disk cache watermarks, slog format |
-| **Tracker store** | `pkg/store` | Durable peers, artifact seeds, sparse chunk index (SQLite WAL default) |
-| **Tracker cache** | `pkg/metacache` | Optional Redis/memory fronting store reads |
-| **Scheduler** | `pkg/scheduler` | Locality rank, EWMA RTT, rarest-first, inflight caps, circuit breaker |
-| **Engine** | `pkg/engine` | Concurrent sync; peer fetch with inflight wait; origin fallback when configured |
-| **Cache manager** | `pkg/cache` | Refcounted LRU, pin/unpin, high/low watermarks |
-| **Observability** | `pkg/metrics`, `pkg/httpserver` | Prometheus metrics; health/readiness on tracker and workers |
-| **Build / deploy** | `scripts/build-binaries.*`, `Containerfile` | Cross-compile on host → slim Alpine runtime image (`localhost/spider:local`) |
+### Configuration summary
 
-Publish registers chunks and seeds under `--node-id` (not a anonymous `"publisher"` id). S3/MinIO origin fallback is enabled only when `S3_BUCKET` is explicitly set — not from endpoint env alone.
+Full reference: **[docs/configuration.md](docs/configuration.md)**
+
+| Section | Key knobs | What it controls |
+|---------|-----------|------------------|
+| `store` / `metaCache` | `driver`, `dsn`, `redis.url` | Tracker durability and hot metadata cache |
+| `chunkCache` | `dir`, `maxBytes`, `pinnedArtifacts` | On-disk chunk shards and LRU eviction |
+| `download` | `maxConcurrency` | Parallel chunk fetch workers per sync |
+| `origin` | `maxConcurrency` | Concurrent origin reads (fallback) |
+| `upload` | `maxConcurrency`, `maxBandwidthMbps`, `maxQueueSize` | Outbound `GetChunk` limits; **Mbps is node-wide** |
+| `peerClient` | `maxConnections`, `idleTimeout` | gRPC connection pool to peers |
+| `advertisement` | `batchSize`, `interval`, `maxRetries` | Batched chunk registration with tracker retry |
+| `peerDiscovery` | `refreshInterval` | Mid-sync tracker polling for peer locations |
+| `retry` | `maxAttempts`, `backoff` | Per-chunk peer retry before origin |
+
+```bash
+# Both binaries read the same file
+./bin/tracker  --config=spider.yaml
+./bin/spiderd  --config=spider.yaml --node-id=worker-1 --tracker=127.0.0.1:50051
+```
 
 ### Core Design Principles
 1. **Artifact-First, Not Model-First**: Treats models, checkpoints, datasets, or software releases as arbitrary multi-file trees of immutable content-addressed chunks.
@@ -80,6 +103,8 @@ Publish registers chunks and seeds under `--node-id` (not a anonymous `"publishe
 3. **Content Addressing & Verification**: Every chunk is addressed by cryptographic hash (`sha256:<hex>`). Chunks are atomically verified before committing to cache or advertising to the mesh.
 4. **Topology-Aware Proximity**: Peering scheduler prefers candidate nodes ranked by network distance (`Host` > `Rack` > `Zone` > `Region` > `Remote`).
 5. **Standalone Engine with Optional Orchestration**: Runs standalone on bare metal, containers, or VMs with zero external dependencies, while providing clean extension points for Kubernetes CRDs and operators.
+
+See [docs/architecture.md](docs/architecture.md) for sync flow, component map, and layer reference.
 
 ---
 
@@ -277,8 +302,9 @@ Numbers and interpretation caveats: [docs/benchmarks.md](docs/benchmarks.md).
 | Phase | Plan Document | Status | Focus |
 |---|---|---|---|
 | **Phase 1** | [`01-poc-and-podman`](docs/plans/phase-1-poc-and-podman-environment.md) | ✅ **Complete** | Core Go primitives, gRPC chunk streaming, tracker, atomic cache, CLI, and benchmark harness. |
-| **Phase 2** | [`02-core-reliability`](docs/plans/phase-2-core-reliability-and-hardening.md) | 🚧 **In progress** | Pluggable Store+Cache (SQLite/Postgres, memory/Redis), seed locate, swarm scheduler, refcounted LRU pins, Prometheus/health, YAML. Implemented; hardening and docs ongoing. |
-| **Phase 3** | [`03-security-auth`](docs/plans/phase-3-security-and-authorization.md) | 📋 Planned | Mutual TLS (mTLS), Ed25519 signed manifests, RBAC, path traversal policies. |
+| **Phase 2** | [`02-core-reliability`](docs/plans/phase-2-core-reliability-and-hardening.md) | ✅ **Complete** | Pluggable Store + metaCache, swarm scheduler, streaming chunk store, YAML config |
+| **Phase 2.5** | [`configuration.md`](docs/configuration.md) | ✅ **Complete** | Node-wide upload bandwidth, EWMA throughput, stale peer reconciliation, ad retry, metrics, conn pool |
+| **Phase 3** | [`03-security-auth`](docs/plans/phase-3-security-and-authorization.md) | 📋 Planned | Mutual TLS (mTLS), Ed25519 signed manifests, RBAC, path traversal policies |
 | **Phase 4** | [`04-k8s-operator`](docs/plans/phase-4-kubernetes-operator-and-crds.md) | 📋 Planned | `ArtifactDeployment` CRD, Kubernetes Operator (`cmd/controller`), `spiderd` DaemonSet manifests. |
 | **Phase 5** | [`05-scale-transports`](docs/plans/phase-5-multi-region-scale-and-transports.md) | 📋 Planned | Multi-region hierarchical control plane, zero-copy `splice` streaming, FastCDC chunking. |
 | **Phase 6** | [`06-ml-gpu-extensions`](docs/plans/phase-6-ml-and-gpu-acceleration-extensions.md) | 📋 Planned | RDMA / GPUDirect Storage (GDS) transports, vLLM / HuggingFace runtime adapters. |
