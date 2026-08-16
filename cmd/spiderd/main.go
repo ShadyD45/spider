@@ -23,6 +23,7 @@ import (
 	"spider/pkg/logging"
 	"spider/pkg/materializer"
 	"spider/pkg/metrics"
+	"spider/pkg/netutil"
 	"spider/pkg/peer"
 	"spider/pkg/scheduler"
 	"spider/pkg/source"
@@ -34,6 +35,7 @@ type daemonSyncHandler struct {
 	eng    *engine.Engine
 	cache  *cache.ChunkStore
 	mgr    *cache.QuotaManager
+	pinned map[string]struct{}
 	s3     source.S3Config
 	runCtx context.Context
 }
@@ -66,13 +68,20 @@ func (h *daemonSyncHandler) HandleSync(ctx context.Context, manifestJSON, destPa
 			return
 		}
 		slog.Info("sync ok", "job", jobID, "summary", metricsOut.FormatSummary())
-		if h.mgr != nil {
-			_ = h.mgr.Pin(manifest)
-			_, _ = h.mgr.MaybeEvict()
-			metrics.CacheUsedBytes.Set(float64(h.mgr.UsedBytes()))
-		}
+		h.afterSuccessfulSync(manifest)
 	}()
 	return jobID, nil
+}
+
+func (h *daemonSyncHandler) afterSuccessfulSync(manifest *v1.ArtifactManifest) {
+	if h.mgr == nil || manifest == nil {
+		return
+	}
+	if _, ok := h.pinned[manifest.ArtifactID]; ok {
+		_ = h.mgr.Pin(manifest)
+	}
+	_, _ = h.mgr.MaybeEvict()
+	metrics.CacheUsedBytes.Set(float64(h.mgr.UsedBytes()))
 }
 
 func (h *daemonSyncHandler) GetStatus(jobID string) *proto.GetNodeStatusResponse {
@@ -164,7 +173,11 @@ func main() {
 		slog.Error("chunk quota manager", "err", err)
 		os.Exit(1)
 	}
+	c.SetOnCommit(mgr.Touch)
+	mgr.Start()
+	pinned := make(map[string]struct{}, len(cfg.ChunkCache.PinnedArtifacts))
 	for _, id := range cfg.ChunkCache.PinnedArtifacts {
+		pinned[id] = struct{}{}
 		if mf, err := c.GetManifest(id); err == nil {
 			_ = mgr.Pin(mf)
 			slog.Info("reconciled pin", "artifact", id)
@@ -197,25 +210,26 @@ func main() {
 		IdleTimeout:    cfg.PeerClient.IdleTimeout,
 	})
 	eng := engine.NewEngine(engine.Config{
-		NodeID:             *nodeID,
-		Locality:           loc,
-		Cache:              c,
-		TrackerClient:      trackerClient,
-		ClientPool:         clientPool,
-		Materializer:       materializer.NewMaterializer(materializer.DefaultOptions()),
-		Scheduler:          scheduler.New(cfg.Download.MaxConcurrency),
-		MaxPeerConcurrency:   cfg.Download.MaxConcurrency,
-		MaxOriginConcurrency: cfg.Origin.MaxConcurrency,
-		Advertisement:        cfg.Advertisement,
-		PeerDiscovery:      cfg.PeerDiscovery,
-		Retry:              cfg.Retry,
+		NodeID:                *nodeID,
+		Locality:              loc,
+		Cache:                 c,
+		TrackerClient:         trackerClient,
+		ClientPool:            clientPool,
+		Materializer:          materializer.NewMaterializer(materializer.DefaultOptions()),
+		Scheduler:             scheduler.New(cfg.Download.MaxConcurrencyPerPeer),
+		MaxPeerConcurrency:    cfg.Download.MaxConcurrency,
+		MaxConcurrencyPerPeer: cfg.Download.MaxConcurrencyPerPeer,
+		MaxOriginConcurrency:  cfg.Origin.MaxConcurrency,
+		Advertisement:         cfg.Advertisement,
+		PeerDiscovery:         cfg.PeerDiscovery,
+		Retry:                 cfg.Retry,
 	})
 
 	s3Cfg := source.S3Config{
 		Bucket: *s3Bucket, Endpoint: *s3Endpoint, Region: *s3Region,
 		AccessKey: *s3AccessKey, SecretKey: *s3SecretKey, UsePathStyle: true,
 	}
-	handler := &daemonSyncHandler{nodeID: *nodeID, eng: eng, cache: c, mgr: mgr, s3: s3Cfg, runCtx: runCtx}
+	handler := &daemonSyncHandler{nodeID: *nodeID, eng: eng, cache: c, mgr: mgr, pinned: pinned, s3: s3Cfg, runCtx: runCtx}
 	var chunkAdvertiser *advertise.Advertiser
 	if trackerClient != nil {
 		chunkAdvertiser = advertise.New(trackerClient, *nodeID, cfg.Advertisement)
@@ -282,6 +296,7 @@ func main() {
 		if chunkAdvertiser != nil {
 			chunkAdvertiser.Stop()
 		}
+		_ = mgr.Close()
 		_ = httpSrv.Shutdown(context.Background())
 		peerServer.Stop()
 		clientPool.Close()
@@ -293,6 +308,9 @@ func main() {
 	}()
 
 	slog.Info("spiderd listening", "node", *nodeID, "port", *port, "chunkCache", cfg.ChunkCache.Dir)
+	if !netutil.IsPrivateOrLoopbackAddr(advAddress) {
+		slog.Warn("advertise address is not loopback/RFC1918 and gRPC has no TLS", "addr", advAddress)
+	}
 	if err := peerServer.Start(*port); err != nil {
 		slog.Error("peer server", "err", err)
 		os.Exit(1)

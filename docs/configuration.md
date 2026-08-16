@@ -115,11 +115,13 @@ chunkCache:
 ```yaml
 download:
   maxConcurrency: 8
+  maxConcurrencyPerPeer: 4
 ```
 
 | Knob | Default | Tuning notes |
 |------|---------|--------------|
 | `maxConcurrency` | `8` | Goroutines pulling missing chunks. Raise on fast LAN + many peers; lower if disk-bound |
+| `maxConcurrencyPerPeer` | `4` | Max in-flight chunk requests to any single peer. Keep well below `maxConcurrency` so workers spread across the swarm |
 
 ### `origin` — origin storage concurrency cap
 

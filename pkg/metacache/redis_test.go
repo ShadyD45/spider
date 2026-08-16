@@ -34,6 +34,16 @@ func TestRedisRoundTripAndInvalidation(t *testing.T) {
 	if err != nil || ok {
 		t.Fatalf("expected prefix delete, ok=%v err=%v", ok, err)
 	}
+	if err := c.MSet(ctx, map[string][]byte{"a": []byte("1"), "b": []byte("2")}, time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	gotMap, err := c.MGet(ctx, []string{"a", "b", "missing"})
+	if err != nil || string(gotMap["a"]) != "1" || string(gotMap["b"]) != "2" {
+		t.Fatalf("mget %v err=%v", gotMap, err)
+	}
+	if _, ok := gotMap["missing"]; ok {
+		t.Fatal("missing key should be absent")
+	}
 }
 
 func TestMemoryTTLExpiry(t *testing.T) {

@@ -23,6 +23,8 @@ type indexFile struct {
 	Pins   map[string][]string  `json:"pins"` // artifactID -> chunk hashes
 }
 
+const defaultIndexFlushInterval = time.Second
+
 // QuotaManager enforces disk quotas with refcounted LRU eviction and artifact pins.
 type QuotaManager struct {
 	cache         *ChunkStore
@@ -32,6 +34,9 @@ type QuotaManager struct {
 	mu            sync.Mutex
 	idx           indexFile
 	path          string
+	dirty         bool
+	done          chan struct{}
+	closeOnce     sync.Once
 }
 
 func NewQuotaManager(c *ChunkStore, maxBytes int64, low, high float64) (*QuotaManager, error) {
@@ -57,6 +62,7 @@ func NewQuotaManager(c *ChunkStore, maxBytes int64, low, high float64) (*QuotaMa
 			Chunks: make(map[string]chunkMeta),
 			Pins:   make(map[string][]string),
 		},
+		done: make(chan struct{}),
 	}
 	_ = m.load()
 	_ = m.reconcileFromDisk()
@@ -88,7 +94,11 @@ func (m *QuotaManager) save() error {
 	if err := os.WriteFile(tmp, data, 0644); err != nil {
 		return err
 	}
-	return os.Rename(tmp, m.path)
+	if err := os.Rename(tmp, m.path); err != nil {
+		return err
+	}
+	m.dirty = false
+	return nil
 }
 
 func (m *QuotaManager) reconcileFromDisk() error {
@@ -114,6 +124,45 @@ func (m *QuotaManager) reconcileFromDisk() error {
 	return m.save()
 }
 
+// Start begins a background flusher for Touch() mutations.
+func (m *QuotaManager) Start() {
+	go m.flushLoop(defaultIndexFlushInterval)
+}
+
+func (m *QuotaManager) flushLoop(interval time.Duration) {
+	if interval <= 0 {
+		interval = defaultIndexFlushInterval
+	}
+	t := time.NewTicker(interval)
+	defer t.Stop()
+	for {
+		select {
+		case <-t.C:
+			_ = m.Flush()
+		case <-m.done:
+			return
+		}
+	}
+}
+
+// Flush writes a dirty index to disk.
+func (m *QuotaManager) Flush() error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if !m.dirty {
+		return nil
+	}
+	return m.save()
+}
+
+// Close stops the background flusher and persists the index.
+func (m *QuotaManager) Close() error {
+	m.closeOnce.Do(func() {
+		close(m.done)
+	})
+	return m.Flush()
+}
+
 func (m *QuotaManager) Touch(hash string, size int64) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -124,7 +173,16 @@ func (m *QuotaManager) Touch(hash string, size int64) {
 	}
 	meta.LastAccess = time.Now().Unix()
 	m.idx.Chunks[hash] = meta
-	_ = m.save()
+	m.dirty = true
+}
+
+func (m *QuotaManager) fillSizeLocked(hash string, meta *chunkMeta) {
+	if meta.Size > 0 {
+		return
+	}
+	if sz, ok := m.cache.CommittedChunkSize(hash); ok {
+		meta.Size = sz
+	}
 }
 
 func (m *QuotaManager) Pin(manifest *v1.ArtifactManifest) error {
@@ -133,11 +191,15 @@ func (m *QuotaManager) Pin(manifest *v1.ArtifactManifest) error {
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if _, already := m.idx.Pins[manifest.ArtifactID]; already {
+		return m.save()
+	}
 	hashes := manifest.AllChunkHashes()
 	m.idx.Pins[manifest.ArtifactID] = hashes
 	for _, h := range hashes {
 		meta := m.idx.Chunks[h]
 		meta.Hash = h
+		m.fillSizeLocked(h, &meta)
 		meta.RefCount++
 		m.idx.Chunks[h] = meta
 	}
@@ -168,6 +230,12 @@ func (m *QuotaManager) Pinned() []string {
 	}
 	sort.Strings(ids)
 	return ids
+}
+
+func (m *QuotaManager) RefCount(hash string) int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.idx.Chunks[hash].RefCount
 }
 
 func (m *QuotaManager) UsedBytes() int64 {

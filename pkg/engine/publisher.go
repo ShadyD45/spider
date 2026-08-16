@@ -62,30 +62,27 @@ func (p *Publisher) Publish(ctx context.Context, src source.Source, prefix strin
 			return nil, fmt.Errorf("failed to open file %s: %w", fileInfo.Path, err)
 		}
 
-		chunks, err := chunker.ChunkReader(r)
-		_ = r.Close()
-		if err != nil {
-			return nil, fmt.Errorf("failed to chunk file %s: %w", fileInfo.Path, err)
-		}
-
 		var chunkRefs []v1.ChunkRef
-		for _, ch := range chunks {
-			// Persist chunk to cache
+		err = chunker.ChunkStream(r, func(ch chunk.Chunk) error {
 			if !p.cache.HasChunk(ch.Hash) {
 				if err := p.cache.PutChunk(ch.Hash, ch.Data); err != nil {
-					return nil, fmt.Errorf("failed to cache chunk %s: %w", ch.Hash, err)
+					return fmt.Errorf("failed to cache chunk %s: %w", ch.Hash, err)
 				}
 			}
-
 			chunkRefs = append(chunkRefs, v1.ChunkRef{
 				Hash:   ch.Hash,
 				Offset: ch.Offset,
 				Size:   ch.Size,
 			})
+			return nil
+		})
+		_ = r.Close()
+		if err != nil {
+			return nil, fmt.Errorf("failed to chunk file %s: %w", fileInfo.Path, err)
 		}
 
 		// Handle empty file case
-		if len(chunks) == 0 && fileInfo.Size == 0 {
+		if len(chunkRefs) == 0 && fileInfo.Size == 0 {
 			emptyHash := chunk.ComputeHash([]byte{})
 			if !p.cache.HasChunk(emptyHash) {
 				_ = p.cache.PutChunk(emptyHash, []byte{})
@@ -136,16 +133,11 @@ func (p *Publisher) PublishFromMemory(ctx context.Context, name, version string,
 	chunker := chunk.NewChunker(p.chunkSize)
 
 	for path, data := range files {
-		chunks, err := chunker.ChunkReader(bytes.NewReader(data))
-		if err != nil {
-			return nil, err
-		}
-
 		var chunkRefs []v1.ChunkRef
-		for _, ch := range chunks {
+		err := chunker.ChunkStream(bytes.NewReader(data), func(ch chunk.Chunk) error {
 			if !p.cache.HasChunk(ch.Hash) {
 				if err := p.cache.PutChunk(ch.Hash, ch.Data); err != nil {
-					return nil, err
+					return err
 				}
 			}
 			chunkRefs = append(chunkRefs, v1.ChunkRef{
@@ -153,6 +145,10 @@ func (p *Publisher) PublishFromMemory(ctx context.Context, name, version string,
 				Offset: ch.Offset,
 				Size:   ch.Size,
 			})
+			return nil
+		})
+		if err != nil {
+			return nil, err
 		}
 
 		manifest.Files = append(manifest.Files, v1.FileEntry{

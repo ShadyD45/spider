@@ -16,8 +16,33 @@ func TestRarestFirst(t *testing.T) {
 		"c": {},
 	}
 	got := RarestFirst([]string{"a", "b", "c"}, locs)
-	if got[0] != "c" || got[1] != "b" || got[2] != "a" {
-		t.Fatalf("got %v", got)
+	if got[0] != "b" || got[1] != "a" || got[2] != "c" {
+		t.Fatalf("got %v want [b a c] (rarest with peers first, 0-peer last)", got)
+	}
+}
+
+func TestRarestFirstTable(t *testing.T) {
+	p := func(n int) []*proto.PeerInfo {
+		out := make([]*proto.PeerInfo, n)
+		for i := 0; i < n; i++ {
+			out[i] = &proto.PeerInfo{NodeId: string(rune('A' + i))}
+		}
+		return out
+	}
+	got := RarestFirst([]string{"zero", "one", "three", "alsoZero"}, map[string][]*proto.PeerInfo{
+		"zero":     {},
+		"one":      p(1),
+		"three":    p(3),
+		"alsoZero": nil,
+	})
+	if got[0] != "one" || got[1] != "three" {
+		t.Fatalf("expected 1-peer then 3-peer first, got %v", got)
+	}
+	if got[2] != "zero" && got[2] != "alsoZero" {
+		t.Fatalf("expected 0-peer hashes last, got %v", got)
+	}
+	if got[3] != "zero" && got[3] != "alsoZero" {
+		t.Fatalf("expected 0-peer hashes last, got %v", got)
 	}
 }
 

@@ -14,9 +14,12 @@ import (
 	"time"
 
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 	"spider/api/v1/proto"
 	"spider/pkg/advertise"
 	"spider/pkg/cache"
+	"spider/pkg/chunk"
 	"spider/pkg/config"
 	"spider/pkg/materializer"
 	"spider/pkg/peer"
@@ -758,5 +761,51 @@ func TestSyncAdvertisesCachedChunks(t *testing.T) {
 		if !found {
 			t.Fatalf("expected node-cached advertised for chunk %s", l.GetChunkHash())
 		}
+	}
+}
+
+func TestContainsCorruptOutOfRange(t *testing.T) {
+	err := status.Error(codes.OutOfRange, "offset past chunk size")
+	if !containsCorrupt(err) {
+		t.Fatal("OutOfRange must be treated as corrupt/partial reset")
+	}
+}
+
+func TestDownloadFromPeerDiscardsOversizedPartial(t *testing.T) {
+	ctx := context.Background()
+	seederDir := t.TempDir()
+	seederCache, err := cache.NewCache(seederDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data := bytes.Repeat([]byte("ok"), 32)
+	h := chunk.ComputeHash(data)
+	if err := seederCache.PutChunk(h, data); err != nil {
+		t.Fatal(err)
+	}
+	lis, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	grpcServer := grpc.NewServer()
+	proto.RegisterPeerServiceServer(grpcServer, peer.NewServer("seed", seederCache, nil))
+	go func() { _ = grpcServer.Serve(lis) }()
+	defer grpcServer.Stop()
+	addr := fmt.Sprintf("127.0.0.1:%d", lis.Addr().(*net.TCPAddr).Port)
+
+	leecher, err := cache.NewCache(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := leecher.AppendPartial(h, bytes.NewReader(bytes.Repeat([]byte("x"), len(data)+40))); err != nil {
+		t.Fatal(err)
+	}
+	eng := NewEngine(Config{NodeID: "leecher", Cache: leecher, ClientPool: peer.NewClientPool()})
+	n, err := eng.downloadFromPeer(ctx, addr, chunkWorkItem{hash: h, size: int64(len(data))})
+	if err != nil {
+		t.Fatalf("download after oversized partial: %v", err)
+	}
+	if n <= 0 || !leecher.HasChunk(h) {
+		t.Fatalf("expected recovered chunk, n=%d", n)
 	}
 }

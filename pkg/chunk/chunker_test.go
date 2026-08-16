@@ -60,3 +60,30 @@ func TestChunkerFile(t *testing.T) {
 		t.Fatalf("Expected 4 chunks and 4 refs, got %d chunks, %d refs", len(chunks), len(refs))
 	}
 }
+
+func TestChunkStreamDoesNotRetainPayloads(t *testing.T) {
+	chunkSize := int64(64)
+	chunker := NewChunker(chunkSize)
+	data := bytes.Repeat([]byte("B"), 64*20)
+	var refs int
+	var maxLive int
+	err := chunker.ChunkStream(bytes.NewReader(data), func(ch Chunk) error {
+		if len(ch.Data) > maxLive {
+			maxLive = len(ch.Data)
+		}
+		if ch.Size > chunkSize {
+			t.Fatalf("chunk larger than chunkSize: %d", ch.Size)
+		}
+		refs++
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if refs != 20 {
+		t.Fatalf("expected 20 chunks, got %d", refs)
+	}
+	if maxLive > int(chunkSize) {
+		t.Fatalf("live payload exceeded chunk size: %d", maxLive)
+	}
+}

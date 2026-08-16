@@ -212,3 +212,28 @@ func TestVerifyHashHelper(t *testing.T) {
 		t.Fatal("expected mismatch error")
 	}
 }
+
+func TestVerifyMaterializedDirectoryRejectsTraversal(t *testing.T) {
+	h := chunk.ComputeHash([]byte("x"))
+	m := &v1.ArtifactManifest{
+		SchemaVersion: 1,
+		Name:          "bad",
+		Version:       "1",
+		ChunkSize:     1,
+		TotalSize:     1,
+		Files: []v1.FileEntry{{
+			Path:   "a/../../outside.txt",
+			Size:   1,
+			Chunks: []v1.ChunkRef{{Hash: h, Offset: 0, Size: 1}},
+		}},
+	}
+	id, err := m.ComputeID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.ArtifactID = id
+	_, err = VerifyMaterializedDirectory(context.Background(), m, t.TempDir())
+	if err == nil {
+		t.Fatal("expected traversal manifest to be rejected")
+	}
+}

@@ -11,6 +11,9 @@ import (
 	"sync/atomic"
 	"time"
 
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
+
 	v1 "spider/api/v1"
 	"spider/api/v1/proto"
 	"spider/pkg/advertise"
@@ -89,23 +92,27 @@ type Engine struct {
 }
 
 type Config struct {
-	NodeID               string
-	Locality             topology.Locality
-	Cache                *cache.ChunkStore
-	TrackerClient        proto.TrackerServiceClient
-	ClientPool           *peer.ClientPool
-	Materializer         *materializer.Materializer
-	Scheduler            *scheduler.Scheduler
-	MaxPeerConcurrency   int
-	MaxOriginConcurrency int
-	Advertisement        config.AdvertisementConfig
-	PeerDiscovery        config.PeerDiscoveryConfig
-	Retry                config.RetryConfig
+	NodeID                string
+	Locality              topology.Locality
+	Cache                 *cache.ChunkStore
+	TrackerClient         proto.TrackerServiceClient
+	ClientPool            *peer.ClientPool
+	Materializer          *materializer.Materializer
+	Scheduler             *scheduler.Scheduler
+	MaxPeerConcurrency    int
+	MaxConcurrencyPerPeer int
+	MaxOriginConcurrency  int
+	Advertisement         config.AdvertisementConfig
+	PeerDiscovery         config.PeerDiscoveryConfig
+	Retry                 config.RetryConfig
 }
 
 func NewEngine(cfg Config) *Engine {
 	if cfg.MaxPeerConcurrency <= 0 {
 		cfg.MaxPeerConcurrency = 8
+	}
+	if cfg.MaxConcurrencyPerPeer <= 0 {
+		cfg.MaxConcurrencyPerPeer = 4
 	}
 	if cfg.MaxOriginConcurrency <= 0 {
 		cfg.MaxOriginConcurrency = 4
@@ -117,7 +124,7 @@ func NewEngine(cfg Config) *Engine {
 		cfg.Materializer = materializer.NewMaterializer(materializer.DefaultOptions())
 	}
 	if cfg.Scheduler == nil {
-		cfg.Scheduler = scheduler.New(cfg.MaxPeerConcurrency)
+		cfg.Scheduler = scheduler.New(cfg.MaxConcurrencyPerPeer)
 	}
 	if cfg.Advertisement.BatchSize <= 0 {
 		cfg.Advertisement.BatchSize = 16
@@ -542,7 +549,7 @@ func (e *Engine) fetchChunk(ctx context.Context, work chunkWorkItem, origin sour
 			addAssigned(assigned, addr, 1)
 			peerCtx, peerCancel := context.WithTimeout(ctx, 30*time.Second)
 			start := time.Now()
-			n, fetchErr := e.downloadFromPeer(peerCtx, addr, work.hash)
+			n, fetchErr := e.downloadFromPeer(peerCtx, addr, work)
 			peerCancel()
 			addAssigned(assigned, addr, -1)
 			ok := fetchErr == nil
@@ -598,40 +605,46 @@ func sortByAssigned(peers []*proto.PeerInfo, assigned *sync.Map) {
 	}
 }
 
-func (e *Engine) downloadFromPeer(ctx context.Context, addr, hash string) (int64, error) {
-	offset := e.cache.PartialSize(hash)
+func (e *Engine) downloadFromPeer(ctx context.Context, addr string, work chunkWorkItem) (int64, error) {
+	unlock := e.cache.LockHash(work.hash)
+	defer unlock()
+	offset := e.cache.PartialSize(work.hash)
+	if work.size > 0 && offset > work.size {
+		_ = e.cache.DiscardPartial(work.hash)
+		offset = 0
+	}
 	pr, pw := io.Pipe()
 	var total int64
 	var dlErr error
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		total, dlErr = e.clientPool.DownloadChunkTo(ctx, addr, hash, offset, pw)
+		total, dlErr = e.clientPool.DownloadChunkTo(ctx, addr, work.hash, offset, pw)
 		if dlErr != nil {
 			_ = pw.CloseWithError(dlErr)
 			return
 		}
 		_ = pw.Close()
 	}()
-	appendErr := e.cache.AppendPartial(hash, pr)
+	appendErr := e.cache.AppendPartial(work.hash, pr)
 	<-done
 	if dlErr != nil {
 		if containsCorrupt(dlErr) || errors.Is(dlErr, cache.ErrHashMismatch) {
-			_ = e.cache.DiscardPartial(hash)
+			_ = e.cache.DiscardPartial(work.hash)
 		}
 		return 0, dlErr
 	}
 	if appendErr != nil {
 		return 0, appendErr
 	}
-	got := e.cache.PartialSize(hash)
+	got := e.cache.PartialSize(work.hash)
 	if total > 0 && got < total {
 		return 0, fmt.Errorf("%w: have %d want %d", cache.ErrIncomplete, got, total)
 	}
-	if err := e.cache.CommitPartial(hash); err != nil {
+	if err := e.cache.CommitPartial(work.hash); err != nil {
 		if errors.Is(err, cache.ErrHashMismatch) {
 			metrics.ChunkVerifyFailures.Inc()
-			_ = e.cache.DiscardPartial(hash)
+			_ = e.cache.DiscardPartial(work.hash)
 		}
 		return 0, err
 	}
@@ -659,6 +672,9 @@ func (e *Engine) downloadFromOrigin(ctx context.Context, work chunkWorkItem, ori
 		return 0, err
 	}
 	defer e.releaseOrigin()
+
+	unlock := e.cache.LockHash(work.hash)
+	defer unlock()
 
 	partial := e.cache.PartialSize(work.hash)
 	remain := work.size - partial
@@ -714,6 +730,9 @@ func containsCorrupt(err error) bool {
 		return false
 	}
 	if errors.Is(err, cache.ErrHashMismatch) {
+		return true
+	}
+	if status.Code(err) == codes.OutOfRange {
 		return true
 	}
 	msg := err.Error()

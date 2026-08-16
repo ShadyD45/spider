@@ -21,12 +21,12 @@ const (
 
 // CachedStore is a read-through decorator. Writes hit inner Store first, then invalidate.
 type CachedStore struct {
-	inner          Store
-	cache          metacache.Cache
-	ttl            time.Duration
-	hbEvery        time.Duration
-	mu             sync.Mutex
-	lastHBFlush    map[string]time.Time
+	inner       Store
+	cache       metacache.Cache
+	ttl         time.Duration
+	hbEvery     time.Duration
+	mu          sync.Mutex
+	lastHBFlush map[string]time.Time
 }
 
 // Wrap returns inner unchanged if cache is nil or Nop-like with driver none handled by caller.
@@ -241,4 +241,90 @@ func (c *CachedStore) LocateChunkNodes(ctx context.Context, hash string) ([]stri
 	}
 	_ = c.cache.Set(ctx, keyChunksPrefix+hash, marshalStrings(ids), c.ttl)
 	return ids, nil
+}
+
+func (c *CachedStore) LocateChunkNodesBatch(ctx context.Context, hashes []string) (map[string][]string, error) {
+	out := make(map[string][]string, len(hashes))
+	if len(hashes) == 0 {
+		return out, nil
+	}
+	keys := make([]string, len(hashes))
+	for i, h := range hashes {
+		keys[i] = keyChunksPrefix + h
+	}
+	got, err := c.cache.MGet(ctx, keys)
+	if err != nil {
+		return nil, err
+	}
+	var misses []string
+	for i, h := range hashes {
+		raw, ok := got[keys[i]]
+		if !ok {
+			c.miss()
+			misses = append(misses, h)
+			continue
+		}
+		c.hit()
+		out[h] = unmarshalStrings(raw)
+	}
+	if len(misses) == 0 {
+		return out, nil
+	}
+	inner, err := c.inner.LocateChunkNodesBatch(ctx, misses)
+	if err != nil {
+		return nil, err
+	}
+	set := make(map[string][]byte, len(inner))
+	for h, ids := range inner {
+		out[h] = ids
+		set[keyChunksPrefix+h] = marshalStrings(ids)
+	}
+	_ = c.cache.MSet(ctx, set, c.ttl)
+	return out, nil
+}
+
+func (c *CachedStore) GetPeersBatch(ctx context.Context, nodeIDs []string) (map[string]*Peer, error) {
+	out := make(map[string]*Peer, len(nodeIDs))
+	if len(nodeIDs) == 0 {
+		return out, nil
+	}
+	keys := make([]string, len(nodeIDs))
+	for i, id := range nodeIDs {
+		keys[i] = keyPeerPrefix + id
+	}
+	got, err := c.cache.MGet(ctx, keys)
+	if err != nil {
+		return nil, err
+	}
+	var misses []string
+	for i, id := range nodeIDs {
+		raw, ok := got[keys[i]]
+		if !ok {
+			c.miss()
+			misses = append(misses, id)
+			continue
+		}
+		c.hit()
+		p, err := unmarshalPeer(raw)
+		if err == nil && p != nil {
+			out[id] = p
+		}
+	}
+	if len(misses) == 0 {
+		return out, nil
+	}
+	inner, err := c.inner.GetPeersBatch(ctx, misses)
+	if err != nil {
+		return nil, err
+	}
+	set := make(map[string][]byte, len(inner))
+	for id, p := range inner {
+		if p == nil {
+			continue
+		}
+		out[id] = p
+		set[keyPeerPrefix+id] = marshal(p)
+	}
+	_ = c.cache.MSet(ctx, set, c.ttl)
+	return out, nil
 }

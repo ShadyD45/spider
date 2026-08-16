@@ -290,6 +290,20 @@ func TestConcurrentUploadsShareBandwidth(t *testing.T) {
 	}
 }
 
+func TestWaitBandwidthFairShare(t *testing.T) {
+	s := &Server{bytesPerSec: 100_000}
+	s.activeStreams.Store(2)
+	ctx := context.Background()
+	start := time.Now()
+	if err := s.waitBandwidth(ctx, 50_000); err != nil {
+		t.Fatal(err)
+	}
+	elapsed := time.Since(start)
+	if elapsed < 700*time.Millisecond || elapsed > 2500*time.Millisecond {
+		t.Fatalf("expected ~1s fair-share wait, got %v", elapsed)
+	}
+}
+
 func TestClientPoolEvictsIdleConnections(t *testing.T) {
 	pool := NewClientPoolWithConfig(PoolConfig{MaxConnections: 4, IdleTimeout: 50 * time.Millisecond})
 	defer pool.Close()

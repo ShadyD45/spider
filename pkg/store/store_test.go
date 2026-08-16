@@ -83,6 +83,17 @@ func TestSQLitePersistence(t *testing.T) {
 	if err != nil || len(ids) != 1 {
 		t.Fatalf("chunks %v %v", ids, err)
 	}
+	batch, err := st2.LocateChunkNodesBatch(ctx, []string{"sha256:abc", "sha256:missing"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(batch["sha256:abc"]) != 1 {
+		t.Fatalf("batch locate %v", batch)
+	}
+	peers, err := st2.GetPeersBatch(ctx, []string{"n1", "missing"})
+	if err != nil || peers["n1"] == nil {
+		t.Fatalf("batch peers %v %v", peers, err)
+	}
 }
 
 func TestPostgresStoreOptional(t *testing.T) {

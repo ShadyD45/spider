@@ -81,10 +81,10 @@ type NodeConfig struct {
 }
 
 type AdvertisementConfig struct {
-	BatchSize      int           `yaml:"batchSize"`
-	Interval       time.Duration `yaml:"interval"`
-	MaxRetries     int           `yaml:"maxRetries"`
-	RetryBackoff   time.Duration `yaml:"retryBackoff"`
+	BatchSize       int           `yaml:"batchSize"`
+	Interval        time.Duration `yaml:"interval"`
+	MaxRetries      int           `yaml:"maxRetries"`
+	RetryBackoff    time.Duration `yaml:"retryBackoff"`
 	MaxRetryBackoff time.Duration `yaml:"maxRetryBackoff"`
 }
 
@@ -93,7 +93,8 @@ type PeerDiscoveryConfig struct {
 }
 
 type DownloadConfig struct {
-	MaxConcurrency int `yaml:"maxConcurrency"`
+	MaxConcurrency        int `yaml:"maxConcurrency"`
+	MaxConcurrencyPerPeer int `yaml:"maxConcurrencyPerPeer"`
 }
 
 type OriginConfig struct {
@@ -171,7 +172,7 @@ func Defaults() Config {
 		},
 		Advertisement: AdvertisementConfig{BatchSize: 16, Interval: 100 * time.Millisecond, MaxRetries: 5, RetryBackoff: 100 * time.Millisecond, MaxRetryBackoff: 5 * time.Second},
 		PeerDiscovery: PeerDiscoveryConfig{RefreshInterval: 500 * time.Millisecond},
-		Download:      DownloadConfig{MaxConcurrency: 8},
+		Download:      DownloadConfig{MaxConcurrency: 8, MaxConcurrencyPerPeer: 4},
 		Origin:        OriginConfig{MaxConcurrency: 4},
 		Upload:        UploadConfig{MaxConcurrency: 16, MaxQueueSize: 100},
 		PeerClient:    PeerClientConfig{MaxConnections: 64, IdleTimeout: 2 * time.Minute},
@@ -272,6 +273,9 @@ func (c *Config) applyZeroDefaults() {
 	if c.Download.MaxConcurrency <= 0 {
 		c.Download.MaxConcurrency = 8
 	}
+	if c.Download.MaxConcurrencyPerPeer <= 0 {
+		c.Download.MaxConcurrencyPerPeer = 4
+	}
 	if c.Origin.MaxConcurrency <= 0 {
 		c.Origin.MaxConcurrency = 4
 	}
@@ -338,6 +342,9 @@ func (c Config) Validate() error {
 	}
 	if c.Download.MaxConcurrency < 1 {
 		return fmt.Errorf("download.maxConcurrency must be >= 1")
+	}
+	if c.Download.MaxConcurrencyPerPeer < 1 {
+		return fmt.Errorf("download.maxConcurrencyPerPeer must be >= 1")
 	}
 	if c.Upload.MaxConcurrency < 1 {
 		return fmt.Errorf("upload.maxConcurrency must be >= 1")

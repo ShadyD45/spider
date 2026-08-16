@@ -154,6 +154,50 @@ func (r *Redis) Set(ctx context.Context, key string, value []byte, ttl time.Dura
 	return nil
 }
 
+func (r *Redis) MGet(ctx context.Context, keys []string) (map[string][]byte, error) {
+	out := make(map[string][]byte, len(keys))
+	if len(keys) == 0 {
+		return out, nil
+	}
+	rk := make([]string, len(keys))
+	for i, k := range keys {
+		rk[i] = r.k(k)
+	}
+	vals, err := r.client.MGet(ctx, rk...).Result()
+	if err != nil {
+		return nil, fmt.Errorf("redis mget: %w", err)
+	}
+	for i, v := range vals {
+		if v == nil {
+			continue
+		}
+		switch t := v.(type) {
+		case string:
+			out[keys[i]] = []byte(t)
+		case []byte:
+			out[keys[i]] = t
+		}
+	}
+	return out, nil
+}
+
+func (r *Redis) MSet(ctx context.Context, items map[string][]byte, ttl time.Duration) error {
+	if len(items) == 0 {
+		return nil
+	}
+	if ttl <= 0 {
+		ttl = r.ttl
+	}
+	pipe := r.client.Pipeline()
+	for k, v := range items {
+		pipe.Set(ctx, r.k(k), v, ttl)
+	}
+	if _, err := pipe.Exec(ctx); err != nil {
+		return fmt.Errorf("redis mset: %w", err)
+	}
+	return nil
+}
+
 func (r *Redis) Delete(ctx context.Context, key string) error {
 	if err := r.client.Del(ctx, r.k(key)).Err(); err != nil {
 		return fmt.Errorf("redis del: %w", err)

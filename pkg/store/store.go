@@ -83,6 +83,8 @@ type Store interface {
 
 	ReportChunks(ctx context.Context, nodeID string, hashes []string) (int64, error)
 	LocateChunkNodes(ctx context.Context, hash string) ([]string, error)
+	LocateChunkNodesBatch(ctx context.Context, hashes []string) (map[string][]string, error)
+	GetPeersBatch(ctx context.Context, nodeIDs []string) (map[string]*Peer, error)
 }
 
 type opener func(opts Options) (Store, error)

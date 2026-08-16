@@ -50,12 +50,30 @@ func NormalizePath(p string) string {
 	return clean
 }
 
+func validManifestPath(p string) bool {
+	if p == "" || strings.HasPrefix(p, "/") {
+		return false
+	}
+	cleaned := filepath.ToSlash(filepath.Clean(filepath.FromSlash(p)))
+	cleaned = strings.TrimPrefix(cleaned, "./")
+	if cleaned == "" || cleaned == "." {
+		return false
+	}
+	if filepath.IsAbs(filepath.FromSlash(p)) || filepath.IsAbs(filepath.FromSlash(cleaned)) {
+		return false
+	}
+	if cleaned == ".." || strings.HasPrefix(cleaned, "../") {
+		return false
+	}
+	return true
+}
+
 // ComputeID calculates the canonical SHA-256 artifact ID based on the manifest content.
 func (m *ArtifactManifest) ComputeID() (string, error) {
 	clone := *m
 	clone.ArtifactID = "" // exclude artifactId when hashing
+	clone.Files = append([]FileEntry(nil), m.Files...)
 
-	// Sort files by path for deterministic canonical output
 	sort.Slice(clone.Files, func(i, j int) bool {
 		return clone.Files[i].Path < clone.Files[j].Path
 	})
@@ -119,7 +137,7 @@ func (m *ArtifactManifest) Validate() error {
 	seenPaths := make(map[string]struct{})
 
 	for i, f := range m.Files {
-		if f.Path == "" || strings.HasPrefix(f.Path, "..") || strings.HasPrefix(f.Path, "/") {
+		if !validManifestPath(f.Path) {
 			return fmt.Errorf("invalid file path at index %d: %q", i, f.Path)
 		}
 		if _, exists := seenPaths[f.Path]; exists {

@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"io"
+	"sync"
 	"testing"
 
 	v1 "spider/api/v1"
@@ -200,5 +201,44 @@ func TestHasChunkDuringWrite(t *testing.T) {
 	}
 	if err := <-done; err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestConcurrentPutSameHashNotCorrupted(t *testing.T) {
+	c, err := NewChunkStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	data := bytes.Repeat([]byte("same-chunk-payload"), 32)
+	h := hashOf(data)
+	var wg sync.WaitGroup
+	errCh := make(chan error, 8)
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if err := c.PutChunk(h, data); err != nil {
+				errCh <- err
+			}
+		}()
+	}
+	wg.Wait()
+	close(errCh)
+	for err := range errCh {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	r, size, err := c.GetChunkReader(h)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Close()
+	got, err := io.ReadAll(r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if size != int64(len(data)) || !bytes.Equal(got, data) {
+		t.Fatalf("concurrent put corrupted chunk size=%d", size)
 	}
 }

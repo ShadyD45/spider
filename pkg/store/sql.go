@@ -338,3 +338,89 @@ func (s *SQLStore) LocateChunkNodes(ctx context.Context, hash string) ([]string,
 	}
 	return ids, rows.Err()
 }
+
+const sqlINBatch = 500
+
+func (s *SQLStore) queryIN(ctx context.Context, prefix string, ids []string) (*sql.Rows, error) {
+	ph := make([]string, len(ids))
+	args := make([]any, len(ids))
+	for i, id := range ids {
+		ph[i] = "?"
+		args[i] = id
+	}
+	q := prefix + strings.Join(ph, ",") + ")"
+	if s.driver == "postgres" {
+		q = placeholdersPostgres(q)
+	}
+	return s.db.QueryContext(ctx, q, args...)
+}
+
+func (s *SQLStore) LocateChunkNodesBatch(ctx context.Context, hashes []string) (map[string][]string, error) {
+	out := make(map[string][]string, len(hashes))
+	for _, h := range hashes {
+		out[h] = nil
+	}
+	for i := 0; i < len(hashes); i += sqlINBatch {
+		end := i + sqlINBatch
+		if end > len(hashes) {
+			end = len(hashes)
+		}
+		batch := hashes[i:end]
+		if len(batch) == 0 {
+			continue
+		}
+		rows, err := s.queryIN(ctx, "SELECT chunk_hash, node_id FROM chunk_locations WHERE chunk_hash IN (", batch)
+		if err != nil {
+			return nil, fmt.Errorf("locate chunks batch: %w", err)
+		}
+		for rows.Next() {
+			var hash, id string
+			if err := rows.Scan(&hash, &id); err != nil {
+				_ = rows.Close()
+				return nil, err
+			}
+			out[hash] = append(out[hash], id)
+		}
+		err = rows.Err()
+		_ = rows.Close()
+		if err != nil {
+			return nil, err
+		}
+	}
+	return out, nil
+}
+
+func (s *SQLStore) GetPeersBatch(ctx context.Context, nodeIDs []string) (map[string]*Peer, error) {
+	out := make(map[string]*Peer, len(nodeIDs))
+	for i := 0; i < len(nodeIDs); i += sqlINBatch {
+		end := i + sqlINBatch
+		if end > len(nodeIDs) {
+			end = len(nodeIDs)
+		}
+		batch := nodeIDs[i:end]
+		if len(batch) == 0 {
+			continue
+		}
+		rows, err := s.queryIN(ctx, "SELECT node_id, address, region, zone, rack, host, last_heartbeat, status FROM peers WHERE node_id IN (", batch)
+		if err != nil {
+			return nil, fmt.Errorf("get peers batch: %w", err)
+		}
+		for rows.Next() {
+			var p Peer
+			var ts int64
+			if err := rows.Scan(&p.NodeID, &p.Address, &p.Region, &p.Zone, &p.Rack, &p.Host, &ts, &p.Status); err != nil {
+				_ = rows.Close()
+				return nil, err
+			}
+			p.LastHeartbeat = time.Unix(ts, 0)
+			cp := p
+			out[p.NodeID] = &cp
+		}
+		err = rows.Err()
+		_ = rows.Close()
+		if err != nil {
+			return nil, err
+		}
+	}
+	return out, nil
+}
