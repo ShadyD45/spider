@@ -3,7 +3,7 @@
 Latest numbers from `scripts/run-benchmarks.ps1` / `scripts/run-benchmarks.sh`. Re-run those scripts to refresh this file.
 
 **Host:** Windows amd64, 11th Gen Intel Core i5-11320H @ 3.20 GHz  
-**Date:** 2026-08-16 (micro + in-process loopback); compose fleet numbers unchanged from 2026-08-15
+**Date:** 2026-08-16 (micro, in-process loopback, and compose fleet — Phase 2.5 build)
 
 ---
 
@@ -46,18 +46,18 @@ goarch: amd64
 cpu: 11th Gen Intel(R) Core(TM) i5-11320H @ 3.20GHz
 
 pkg: spider/pkg/chunk
-BenchmarkChunker4MiB-8             	      50	  24753866 ns/op	 677.76 MB/s	20972909 B/op	      21 allocs/op
-BenchmarkSHA256HashCalculation-8   	     385	   2746087 ns/op	1527.37 MB/s	     208 B/op	       3 allocs/op
+BenchmarkChunker4MiB-8             	      27	  55746789 ns/op	 300.95 MB/s	20972804 B/op	      21 allocs/op
+BenchmarkSHA256HashCalculation-8   	     100	  11228206 ns/op	 373.55 MB/s	     208 B/op	       3 allocs/op
 
 pkg: spider/pkg/cache
-BenchmarkCacheAtomicPut4MiB-8   	      44	  23111555 ns/op	 181.48 MB/s	   37287 B/op	      31 allocs/op
+BenchmarkCacheAtomicPut4MiB-8   	      24	 166526675 ns/op	  25.19 MB/s	   37335 B/op	      31 allocs/op
 ```
 
 | Primitive | ns/op | Throughput | Allocs |
 |---|---|---|---|
-| SHA-256 (4 MiB) | 2.75 ms | 1527 MB/s | 3 |
-| Fixed 4 MiB chunker (16 MiB stream) | 24.8 ms | 678 MB/s | 21 |
-| Atomic cache Put + on-disk re-hash | 23.1 ms | 181 MB/s | 31 |
+| SHA-256 (4 MiB) | 11.2 ms | 374 MB/s | 3 |
+| Fixed 4 MiB chunker (16 MiB stream) | 55.7 ms | 301 MB/s | 21 |
+| Atomic cache Put + on-disk re-hash | 166.5 ms | 25 MB/s | 31 |
 
 ---
 
@@ -69,10 +69,10 @@ Same-host loopback; no compose/Grafana. Useful for quick engine regression check
 
 | Metric | Direct origin | Spider P2P | Improvement |
 |---|---|---|---|
-| Duration | 11.7s | 32.7s | 0.36× wall clock |
+| Duration | 12.0s | 29.7s | 0.40× wall clock |
 | Origin data | 3000 MB | 0 MB | **100% origin saved** |
 | Peer data | 0 | 3000 MB | offloaded to mesh |
-| Fleet throughput | 256 MB/s | 92 MB/s | — |
+| Fleet throughput | 251 MB/s | 101 MB/s | — |
 
 ### Compose stack (`run-compose-benchmark`) — 500 MB × 3 workers
 
@@ -80,12 +80,14 @@ Real `spiderd` nodes, central tracker (Redis + SQLite), Prometheus scrape.
 
 | Metric | Direct origin | Spider P2P | Improvement |
 |---|---|---|---|
-| Duration | 34.1s | 35.4s | 0.96× wall clock |
-| Origin data | 1500 MB | 0 MB | **100% origin saved** |
+| Duration | 33.8s | 31.5s | **1.07× wall clock** |
+| Origin data | 856 MB | 0 MB | **100% origin saved** |
 | Peer data | 0 | 1000 MB | offloaded to mesh |
-| Fleet throughput | 43.9 MB/s | 42.4 MB/s | — |
+| Fleet throughput | 44.4 MB/s | 47.6 MB/s | — |
 
 Prometheus delta (full run): `origin_downloaded=0`, `peer_transferred=1048576000`.
+
+Baseline origin bytes (856 MB vs theoretical 1500 MB) reflect sync-log totals after worker cache resets; some workers may report partial reuse across scenario setup. Mesh scenario still shows **zero** origin bytes on workers 2–3.
 
 ---
 
@@ -119,8 +121,8 @@ Swarm amplification (`rate(peer_bytes) / rate(origin_bytes)`) measures distribut
 
 | Benchmark | Workers | Origin (baseline) | Origin (P2P) | Peer (P2P) | Wall clock (baseline → P2P) |
 |---|---|---|---|---|---|
-| In-process loopback | 6 × 500 MB | 3000 MB | 0 MB (**100% saved**) | 3000 MB | 11.7s → 32.7s (**0.36×**) |
-| Compose fleet *(2026-08-15)* | 3 × 500 MB | 1500 MB | 0 MB (**100% saved**) | 1000 MB | 34.1s → 35.4s (**0.96×**) |
+| In-process loopback | 6 × 500 MB | 3000 MB | 0 MB (**100% saved**) | 3000 MB | 12.0s → 29.7s (**0.40×**) |
+| Compose fleet | 3 × 500 MB | 856 MB | 0 MB (**100% saved**) | 1000 MB | 33.8s → 31.5s (**1.07×**) |
 
 Compose mesh: worker-1 seeds; workers 2–3 pull 500 MB each from worker-1; worker-1 reuses local cache. No worker reads `/bench/origin` during mesh sync.
 
@@ -156,7 +158,7 @@ These runs are **misleading for wall-clock speedup** if taken out of context:
 - [ ] **Multi-machine fleet** — Separate seed host, multiple worker hosts, remote object-store origin (different AZ/region).
 - [ ] **Rate-limited origin** — Throttle S3/MinIO to simulate production egress caps.
 - [ ] **Larger artifacts & more workers** — e.g. 10+ nodes, multi-GB models.
-- [ ] **Document refreshed results** in this file after each multi-host run.
+- [ ] **Document refreshed results** in this file after each multi-host run. *(Same-host compose + loopback refreshed 2026-08-16.)*
 
 ---
 
