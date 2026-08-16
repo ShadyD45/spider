@@ -19,11 +19,11 @@
 
 Latest recorded numbers and methodology: **[docs/benchmarks.md](docs/benchmarks.md)**.
 
-| Mode | What it measures | Recorded on this host (2026-08-15) |
+| Mode | What it measures | Recorded on this host (2026-08-16) |
 | :--- | :--- | :--- |
-| Micro (Go `bench`) | Chunker, SHA-256, cache Put | 631–1143 MB/s compute; ~67 MB/s atomic cache Put |
-| In-process loopback | Engine regression, 500 MB × 6 workers | **94.9% origin saved**; ~0.78× wall clock vs direct origin |
-| Compose fleet | Real `spiderd` + tracker + Grafana, 500 MB × 3 workers | **100% origin saved**; ~0.96× wall clock vs direct origin |
+| Micro (Go `bench`) | Chunker, SHA-256, cache Put | 678–1527 MB/s compute; ~181 MB/s atomic cache Put |
+| In-process loopback | Engine regression, 500 MB × 6 workers | **100% origin saved**; ~0.36× wall clock vs direct origin |
+| Compose fleet *(2026-08-15)* | Real `spiderd` + tracker + Grafana, 500 MB × 3 workers | **100% origin saved**; ~0.96× wall clock vs direct origin |
 
 **Do not read wall-clock alone as “Spider is slower/faster.”** On a single machine (loopback or Podman on one host), origin is already a fast local bind mount — P2P adds gRPC, tracker, and verification overhead without cross-network savings. The primary metric is **origin-byte reduction** (`origin_bytes_saved`, Prometheus `spider_origin_bytes_downloaded_total` vs `spider_peer_bytes_transferred_total`).
 

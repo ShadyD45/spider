@@ -3,7 +3,7 @@
 Latest numbers from `scripts/run-benchmarks.ps1` / `scripts/run-benchmarks.sh`. Re-run those scripts to refresh this file.
 
 **Host:** Windows amd64, 11th Gen Intel Core i5-11320H @ 3.20 GHz  
-**Date:** 2026-08-15
+**Date:** 2026-08-16 (micro + in-process loopback); compose fleet numbers unchanged from 2026-08-15
 
 ---
 
@@ -46,18 +46,18 @@ goarch: amd64
 cpu: 11th Gen Intel(R) Core(TM) i5-11320H @ 3.20GHz
 
 pkg: spider/pkg/chunk
-BenchmarkChunker4MiB-8             	      51	  26592863 ns/op	 630.89 MB/s	20972907 B/op	      21 allocs/op
-BenchmarkSHA256HashCalculation-8   	     358	   3668705 ns/op	1143.27 MB/s	     208 B/op	       3 allocs/op
+BenchmarkChunker4MiB-8             	      50	  24753866 ns/op	 677.76 MB/s	20972909 B/op	      21 allocs/op
+BenchmarkSHA256HashCalculation-8   	     385	   2746087 ns/op	1527.37 MB/s	     208 B/op	       3 allocs/op
 
 pkg: spider/pkg/cache
-BenchmarkCacheAtomicPut4MiB-8   	      20	  62205305 ns/op	  67.43 MB/s	   35850 B/op	      25 allocs/op
+BenchmarkCacheAtomicPut4MiB-8   	      44	  23111555 ns/op	 181.48 MB/s	   37287 B/op	      31 allocs/op
 ```
 
 | Primitive | ns/op | Throughput | Allocs |
 |---|---|---|---|
-| SHA-256 (4 MiB) | 3.67 ms | 1143 MB/s | 3 |
-| Fixed 4 MiB chunker (16 MiB stream) | 26.6 ms | 631 MB/s | 21 |
-| Atomic cache Put + on-disk re-hash | 62.2 ms | 67 MB/s | 25 |
+| SHA-256 (4 MiB) | 2.75 ms | 1527 MB/s | 3 |
+| Fixed 4 MiB chunker (16 MiB stream) | 24.8 ms | 678 MB/s | 21 |
+| Atomic cache Put + on-disk re-hash | 23.1 ms | 181 MB/s | 31 |
 
 ---
 
@@ -69,9 +69,10 @@ Same-host loopback; no compose/Grafana. Useful for quick engine regression check
 
 | Metric | Direct origin | Spider P2P | Improvement |
 |---|---|---|---|
-| Duration | 1m 1.5s | 1m 18.6s | 0.78× wall clock |
-| Origin data | 3000 MB | 152 MB | **94.9% origin saved** |
-| Peer data | 0 | 2848 MB | offloaded to mesh |
+| Duration | 11.7s | 32.7s | 0.36× wall clock |
+| Origin data | 3000 MB | 0 MB | **100% origin saved** |
+| Peer data | 0 | 3000 MB | offloaded to mesh |
+| Fleet throughput | 256 MB/s | 92 MB/s | — |
 
 ### Compose stack (`run-compose-benchmark`) — 500 MB × 3 workers
 
@@ -99,12 +100,12 @@ Spider’s main value on a real fleet is **reducing traffic to origin storage** 
 
 Wall-clock duration can be **equal to or slower than** direct origin on a single host. That does **not** mean P2P failed if origin bytes dropped.
 
-### Recorded results summary (2026-08-15)
+### Recorded results summary (2026-08-16)
 
 | Benchmark | Workers | Origin (baseline) | Origin (P2P) | Peer (P2P) | Wall clock (baseline → P2P) |
 |---|---|---|---|---|---|
-| In-process loopback | 6 × 500 MB | 3000 MB | 152 MB (**94.9% saved**) | 2848 MB | 61.5s → 78.6s (**0.78×**) |
-| Compose fleet | 3 × 500 MB | 1500 MB | 0 MB (**100% saved**) | 1000 MB | 34.1s → 35.4s (**0.96×**) |
+| In-process loopback | 6 × 500 MB | 3000 MB | 0 MB (**100% saved**) | 3000 MB | 11.7s → 32.7s (**0.36×**) |
+| Compose fleet *(2026-08-15)* | 3 × 500 MB | 1500 MB | 0 MB (**100% saved**) | 1000 MB | 34.1s → 35.4s (**0.96×**) |
 
 Compose mesh: worker-1 seeds; workers 2–3 pull 500 MB each from worker-1; worker-1 reuses local cache. No worker reads `/bench/origin` during mesh sync.
 
@@ -147,13 +148,16 @@ These runs are **misleading for wall-clock speedup** if taken out of context:
 ## How to refresh
 
 ```powershell
+# Microbenchmarks only
+go test -count=1 -bench="." -benchmem ./pkg/chunk ./pkg/cache
+
+# In-process loopback (no Grafana)
+go build -o bin/spiderctl.exe ./cmd/spiderctl
+.\bin\spiderctl.exe benchmark --size=500 --workers=6 --chunk-size=4
+
 # Full suite: micro + compose fleet (feeds Grafana)
 .\scripts\run-benchmarks.ps1
 
 # Compose only (stack left running)
 .\scripts\run-compose-benchmark.ps1
-
-# Optional fast in-process check (no Grafana)
-go build -o bin/spiderctl.exe ./cmd/spiderctl
-.\bin\spiderctl.exe benchmark --size=500 --workers=6 --chunk-size=4
 ```
