@@ -75,6 +75,7 @@ func NewServerWithLimits(nodeID string, c *cache.ChunkStore, syncHandler SyncHan
 		bytesPerSec := float64(lim.MaxBandwidthMbps) * 1024 * 1024 / 8
 		s.limiter = rate.NewLimiter(rate.Limit(bytesPerSec), StreamSliceSize)
 	}
+	metrics.UploadBandwidthLimitMbps.Set(float64(lim.MaxBandwidthMbps))
 	if lim.AfterAcquire != nil {
 		s.afterAcquire = lim.AfterAcquire
 	}

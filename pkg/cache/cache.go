@@ -101,6 +101,31 @@ func (c *ChunkStore) HasChunk(hash string) bool {
 	return err == nil && !info.IsDir()
 }
 
+// CommittedChunkSize returns the on-disk size of a committed chunk, if present.
+func (c *ChunkStore) CommittedChunkSize(hash string) (int64, bool) {
+	p, err := c.chunkPath(hash)
+	if err != nil {
+		return 0, false
+	}
+	info, err := os.Stat(p)
+	if err != nil || info.IsDir() {
+		return 0, false
+	}
+	return info.Size(), true
+}
+
+// HasValidCommittedChunk reports whether a committed chunk exists and matches expectedSize when set.
+func (c *ChunkStore) HasValidCommittedChunk(hash string, expectedSize int64) bool {
+	if !c.HasChunk(hash) {
+		return false
+	}
+	if expectedSize <= 0 {
+		return true
+	}
+	sz, ok := c.CommittedChunkSize(hash)
+	return ok && sz == expectedSize
+}
+
 // RootDir returns the store root.
 func (c *ChunkStore) RootDir() string { return c.rootDir }
 

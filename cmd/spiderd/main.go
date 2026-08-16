@@ -15,6 +15,7 @@ import (
 
 	v1 "spider/api/v1"
 	"spider/api/v1/proto"
+	"spider/pkg/advertise"
 	"spider/pkg/cache"
 	"spider/pkg/config"
 	"spider/pkg/engine"
@@ -215,6 +216,10 @@ func main() {
 		AccessKey: *s3AccessKey, SecretKey: *s3SecretKey, UsePathStyle: true,
 	}
 	handler := &daemonSyncHandler{nodeID: *nodeID, eng: eng, cache: c, mgr: mgr, s3: s3Cfg, runCtx: runCtx}
+	var chunkAdvertiser *advertise.Advertiser
+	if trackerClient != nil {
+		chunkAdvertiser = advertise.New(trackerClient, *nodeID, cfg.Advertisement)
+	}
 	peerServer := peer.NewServerWithLimits(*nodeID, c, handler, peer.UploadLimits{
 		MaxConcurrency:   cfg.Upload.MaxConcurrency,
 		MaxQueueSize:     cfg.Upload.MaxQueueSize,
@@ -247,11 +252,9 @@ func main() {
 			} else {
 				slog.Info("registered with tracker", "node", *nodeID, "addr", advAddress)
 			}
-			existingChunks, _ := c.ListChunks()
-			if len(existingChunks) > 0 {
-				repCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-				_, _ = trackerClient.ReportChunks(repCtx, &proto.ReportChunksRequest{NodeId: *nodeID, ChunkHashes: existingChunks})
-				cancel()
+			existingChunks, _ := cache.StartupReconcileHashes(c, cfg.ChunkCache.PinnedArtifacts)
+			if len(existingChunks) > 0 && chunkAdvertiser != nil {
+				chunkAdvertiser.Reconcile(existingChunks)
 			}
 			ticker := time.NewTicker(5 * time.Second)
 			defer ticker.Stop()
@@ -276,6 +279,9 @@ func main() {
 	go func() {
 		<-runCtx.Done()
 		slog.Info("shutting down spiderd")
+		if chunkAdvertiser != nil {
+			chunkAdvertiser.Stop()
+		}
 		_ = httpSrv.Shutdown(context.Background())
 		peerServer.Stop()
 		clientPool.Close()

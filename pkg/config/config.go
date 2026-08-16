@@ -81,10 +81,11 @@ type NodeConfig struct {
 }
 
 type AdvertisementConfig struct {
-	BatchSize    int           `yaml:"batchSize"`
-	Interval     time.Duration `yaml:"interval"`
-	MaxRetries   int           `yaml:"maxRetries"`
-	RetryBackoff time.Duration `yaml:"retryBackoff"`
+	BatchSize      int           `yaml:"batchSize"`
+	Interval       time.Duration `yaml:"interval"`
+	MaxRetries     int           `yaml:"maxRetries"`
+	RetryBackoff   time.Duration `yaml:"retryBackoff"`
+	MaxRetryBackoff time.Duration `yaml:"maxRetryBackoff"`
 }
 
 type PeerDiscoveryConfig struct {
@@ -168,7 +169,7 @@ func Defaults() Config {
 			Zone:        "zone-a",
 			Rack:        "rack-1",
 		},
-		Advertisement: AdvertisementConfig{BatchSize: 16, Interval: 100 * time.Millisecond, MaxRetries: 5, RetryBackoff: 100 * time.Millisecond},
+		Advertisement: AdvertisementConfig{BatchSize: 16, Interval: 100 * time.Millisecond, MaxRetries: 5, RetryBackoff: 100 * time.Millisecond, MaxRetryBackoff: 5 * time.Second},
 		PeerDiscovery: PeerDiscoveryConfig{RefreshInterval: 500 * time.Millisecond},
 		Download:      DownloadConfig{MaxConcurrency: 8},
 		Origin:        OriginConfig{MaxConcurrency: 4},
@@ -255,6 +256,9 @@ func (c *Config) applyZeroDefaults() {
 	}
 	if c.Advertisement.RetryBackoff <= 0 {
 		c.Advertisement.RetryBackoff = 100 * time.Millisecond
+	}
+	if c.Advertisement.MaxRetryBackoff <= 0 {
+		c.Advertisement.MaxRetryBackoff = 5 * time.Second
 	}
 	if c.PeerClient.MaxConnections <= 0 {
 		c.PeerClient.MaxConnections = 64

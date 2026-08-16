@@ -15,6 +15,7 @@ import (
 
 	"google.golang.org/grpc"
 	"spider/api/v1/proto"
+	"spider/pkg/advertise"
 	"spider/pkg/cache"
 	"spider/pkg/config"
 	"spider/pkg/materializer"
@@ -396,15 +397,15 @@ func TestAdvertiserFlushesBeforeStop(t *testing.T) {
 		reports = append(reports, append([]string(nil), hashes...))
 		mu.Unlock()
 	}}
-	ad := newAdvertiser(client, "node-a", config.AdvertisementConfig{
+	ad := advertise.New(client, "node-a", config.AdvertisementConfig{
 		BatchSize:    4,
 		Interval:     50 * time.Millisecond,
 		MaxRetries:   5,
 		RetryBackoff: 10 * time.Millisecond,
-	}, 2*time.Second)
-	ad.enqueue("sha256:aa")
-	ad.enqueue("sha256:bb")
-	ad.stop()
+	})
+	ad.Enqueue("sha256:aa")
+	ad.Enqueue("sha256:bb")
+	ad.Stop()
 
 	mu.Lock()
 	defer mu.Unlock()
@@ -627,15 +628,15 @@ func TestLocationMapReconcilesStalePeers(t *testing.T) {
 func TestAdvertiserRetriesOnFailure(t *testing.T) {
 	var calls atomic.Int32
 	failClient := &failingReporter{failUntil: 2, calls: &calls}
-	ad := newAdvertiser(failClient, "node-a", config.AdvertisementConfig{
+	ad := advertise.New(failClient, "node-a", config.AdvertisementConfig{
 		BatchSize:    1,
 		Interval:     20 * time.Millisecond,
 		MaxRetries:   5,
 		RetryBackoff: 10 * time.Millisecond,
-	}, 200*time.Millisecond)
-	ad.enqueue("sha256:retry")
+	})
+	ad.Enqueue("sha256:retry")
 	time.Sleep(300 * time.Millisecond)
-	ad.stop()
+	ad.Stop()
 	if calls.Load() < 2 {
 		t.Fatalf("expected retries, got %d calls", calls.Load())
 	}
@@ -681,4 +682,81 @@ func (r *reportSpy) ReportChunks(_ context.Context, req *proto.ReportChunksReque
 		r.onReport(req.GetChunkHashes())
 	}
 	return &proto.ReportChunksResponse{ChunksRecorded: int64(len(req.GetChunkHashes()))}, nil
+}
+
+func TestSyncAdvertisesCachedChunks(t *testing.T) {
+	ctx := context.Background()
+
+	trReg := tracker.NewRegistry(10 * time.Second)
+	trSrv := tracker.NewServer(trReg)
+	trLis, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	grpcTracker := grpc.NewServer()
+	proto.RegisterTrackerServiceServer(grpcTracker, trSrv)
+	go func() { _ = grpcTracker.Serve(trLis) }()
+	defer grpcTracker.Stop()
+
+	trConn, err := grpc.Dial(fmt.Sprintf("127.0.0.1:%d", trLis.Addr().(*net.TCPAddr).Port), grpc.WithInsecure())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer trConn.Close()
+	trClient := proto.NewTrackerServiceClient(trConn)
+
+	originDir := t.TempDir()
+	data := []byte("cached-chunk-payload-12345678")
+	if err := os.WriteFile(filepath.Join(originDir, "model.bin"), data, 0644); err != nil {
+		t.Fatal(err)
+	}
+	originSrc, err := source.NewFilesystemSource(originDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	nodeCache, err := cache.NewCache(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	pub := NewPublisher(nodeCache, 32)
+	manifest, err := pub.Publish(ctx, originSrc, "", "cached-model", "1.0")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, _ = trClient.RegisterPeer(ctx, &proto.RegisterPeerRequest{Peer: &proto.PeerInfo{NodeId: "node-cached", Address: "127.0.0.1:9"}})
+
+	eng := NewEngine(Config{
+		NodeID:        "node-cached",
+		Cache:         nodeCache,
+		TrackerClient: trClient,
+		Materializer:  materializer.NewMaterializer(materializer.DefaultOptions()),
+		Advertisement: config.AdvertisementConfig{BatchSize: 1, Interval: 20 * time.Millisecond, MaxRetries: 3, RetryBackoff: 10 * time.Millisecond},
+	})
+
+	dest := filepath.Join(t.TempDir(), "out")
+	if _, err := eng.Sync(ctx, "job-cached", manifest, dest, originSrc); err != nil {
+		t.Fatal(err)
+	}
+
+	time.Sleep(250 * time.Millisecond)
+	loc, err := trClient.LocateChunks(ctx, &proto.LocateChunksRequest{
+		RequesterNodeId: "other",
+		ChunkHashes:     manifest.AllChunkHashes(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, l := range loc.GetLocations() {
+		found := false
+		for _, p := range l.GetPeers() {
+			if p.GetNodeId() == "node-cached" {
+				found = true
+			}
+		}
+		if !found {
+			t.Fatalf("expected node-cached advertised for chunk %s", l.GetChunkHash())
+		}
+	}
 }

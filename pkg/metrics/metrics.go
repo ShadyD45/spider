@@ -42,6 +42,10 @@ var (
 		Name: "spider_swarm_chunks_with_peers",
 		Help: "Missing chunks with at least one known peer during sync",
 	})
+	SwarmAvgChunkReplication = promauto.NewGauge(prometheus.GaugeOpts{
+		Name: "spider_swarm_avg_chunk_replication",
+		Help: "Average peer source count per missing chunk during sync",
+	})
 	SwarmAmplificationRatio = promauto.NewGauge(prometheus.GaugeOpts{
 		Name: "spider_swarm_amplification_ratio",
 		Help: "Peer bytes transferred divided by origin bytes downloaded for the last completed sync",
@@ -53,6 +57,10 @@ var (
 	AdvertisementFailures = promauto.NewCounter(prometheus.CounterOpts{
 		Name: "spider_advertisement_failures_total",
 		Help: "Chunk advertisement attempts that failed after retries",
+	})
+	AdvertisementRetries = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "spider_advertisement_retries_total",
+		Help: "Chunk advertisement retry attempts scheduled after transient failures",
 	})
 	AdvertisementQueueDepth = promauto.NewGauge(prometheus.GaugeOpts{
 		Name: "spider_advertisement_queue_depth",
@@ -79,6 +87,18 @@ var (
 		Name: "spider_active_peers_count",
 		Help: "Healthy peers registered with the tracker",
 	})
+	UploadBandwidthLimitMbps = promauto.NewGauge(prometheus.GaugeOpts{
+		Name: "spider_upload_bandwidth_limit_mbps",
+		Help: "Configured node-wide P2P upload bandwidth cap in Mbps (0 = unlimited)",
+	})
+	FleetReadyNodes = promauto.NewGauge(prometheus.GaugeOpts{
+		Name: "spider_fleet_ready_nodes",
+		Help: "Nodes that reported artifact completion for the latest published artifact",
+	})
+	FleetTimeToReadySeconds = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "spider_fleet_time_to_ready_seconds",
+		Help: "Seconds from artifact publish to fleet readiness threshold",
+	}, []string{"threshold"})
 	StoreCacheHits = promauto.NewCounter(prometheus.CounterOpts{
 		Name: "spider_store_cache_hits_total",
 		Help: "Tracker metadata cache hits",

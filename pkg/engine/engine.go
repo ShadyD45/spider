@@ -11,9 +11,9 @@ import (
 	"sync/atomic"
 	"time"
 
-	"google.golang.org/grpc"
 	v1 "spider/api/v1"
 	"spider/api/v1/proto"
+	"spider/pkg/advertise"
 	"spider/pkg/cache"
 	"spider/pkg/config"
 	"spider/pkg/materializer"
@@ -269,6 +269,7 @@ func (m *locationMap) updateSwarmMetrics(remaining []string) {
 	}
 	unique := make(map[string]struct{})
 	withPeers := 0
+	totalPeerSources := 0
 	for h, peers := range m.locs {
 		if _, ok := remainingSet[h]; !ok {
 			continue
@@ -277,6 +278,7 @@ func (m *locationMap) updateSwarmMetrics(remaining []string) {
 			continue
 		}
 		withPeers++
+		totalPeerSources += len(peers)
 		for _, p := range peers {
 			if p != nil && p.Address != "" {
 				unique[p.Address] = struct{}{}
@@ -285,6 +287,11 @@ func (m *locationMap) updateSwarmMetrics(remaining []string) {
 	}
 	metrics.SwarmUniqueSources.Set(float64(len(unique)))
 	metrics.SwarmChunksWithPeers.Set(float64(withPeers))
+	if withPeers > 0 {
+		metrics.SwarmAvgChunkReplication.Set(float64(totalPeerSources) / float64(withPeers))
+	} else {
+		metrics.SwarmAvgChunkReplication.Set(0)
+	}
 }
 
 func (m *locationMap) snapshot() map[string][]*proto.PeerInfo {
@@ -295,180 +302,6 @@ func (m *locationMap) snapshot() map[string][]*proto.PeerInfo {
 		out[k] = append([]*proto.PeerInfo(nil), v...)
 	}
 	return out
-}
-
-type chunkReporter interface {
-	ReportChunks(ctx context.Context, in *proto.ReportChunksRequest, opts ...grpc.CallOption) (*proto.ReportChunksResponse, error)
-}
-
-type advertiser struct {
-	client       chunkReporter
-	nodeID       string
-	batchSize    int
-	interval     time.Duration
-	maxRetries   int
-	retryInitial time.Duration
-	retryMax     time.Duration
-	ch           chan string
-	retry        []retryEntry
-	retryMu      sync.Mutex
-	done         chan struct{}
-	finished     chan struct{}
-}
-
-type retryEntry struct {
-	hash    string
-	attempt int
-	nextAt  time.Time
-}
-
-func newAdvertiser(client chunkReporter, nodeID string, cfg config.AdvertisementConfig, retryMax time.Duration) *advertiser {
-	if retryMax <= 0 {
-		retryMax = 2 * time.Second
-	}
-	a := &advertiser{
-		client:       client,
-		nodeID:       nodeID,
-		batchSize:    cfg.BatchSize,
-		interval:     cfg.Interval,
-		maxRetries:   cfg.MaxRetries,
-		retryInitial: cfg.RetryBackoff,
-		retryMax:     retryMax,
-		ch:           make(chan string, 1024),
-		done:         make(chan struct{}),
-		finished:     make(chan struct{}),
-	}
-	go a.loop()
-	return a
-}
-
-func (a *advertiser) enqueue(hash string) {
-	if a == nil || a.client == nil || hash == "" {
-		return
-	}
-	select {
-	case a.ch <- hash:
-		metrics.AdvertisementQueueDepth.Inc()
-	default:
-		_ = a.flush([]string{hash}, 0)
-	}
-}
-
-func (a *advertiser) loop() {
-	defer close(a.finished)
-	t := time.NewTicker(a.interval)
-	defer t.Stop()
-	var buf []string
-	flush := func() {
-		if len(buf) == 0 {
-			return
-		}
-		_ = a.flush(buf, 0)
-		buf = buf[:0]
-	}
-	for {
-		select {
-		case <-a.done:
-			for {
-				select {
-				case h := <-a.ch:
-					buf = append(buf, h)
-				default:
-					flush()
-					a.flushRetries(true)
-					return
-				}
-			}
-		case h := <-a.ch:
-			buf = append(buf, h)
-			if len(buf) >= a.batchSize {
-				flush()
-			}
-		case <-t.C:
-			flush()
-			a.flushRetries(false)
-		}
-	}
-}
-
-func (a *advertiser) scheduleRetry(hashes []string, attempt int) {
-	if len(hashes) == 0 {
-		return
-	}
-	backoff := a.retryInitial
-	for i := 1; i < attempt; i++ {
-		backoff *= 2
-		if backoff > a.retryMax {
-			backoff = a.retryMax
-			break
-		}
-	}
-	nextAt := time.Now().Add(backoff)
-	a.retryMu.Lock()
-	defer a.retryMu.Unlock()
-	const maxRetryQueue = 4096
-	for _, h := range hashes {
-		if len(a.retry) >= maxRetryQueue {
-			slog.Warn("advertisement retry queue full, dropping hash", "hash", h)
-			metrics.AdvertisementFailures.Inc()
-			continue
-		}
-		a.retry = append(a.retry, retryEntry{hash: h, attempt: attempt, nextAt: nextAt})
-		metrics.AdvertisementQueueDepth.Inc()
-	}
-}
-
-func (a *advertiser) flushRetries(force bool) {
-	now := time.Now()
-	a.retryMu.Lock()
-	var ready []string
-	var attempts []int
-	var rest []retryEntry
-	for _, e := range a.retry {
-		if force || !e.nextAt.After(now) {
-			ready = append(ready, e.hash)
-			attempts = append(attempts, e.attempt)
-		} else {
-			rest = append(rest, e)
-		}
-	}
-	a.retry = rest
-	a.retryMu.Unlock()
-	for i, h := range ready {
-		_ = a.flush([]string{h}, attempts[i])
-	}
-}
-
-func (a *advertiser) flush(hashes []string, attempt int) error {
-	if a.client == nil || len(hashes) == 0 {
-		return nil
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	_, err := a.client.ReportChunks(ctx, &proto.ReportChunksRequest{
-		NodeId:      a.nodeID,
-		ChunkHashes: hashes,
-	})
-	if err != nil {
-		if attempt+1 < a.maxRetries {
-			a.scheduleRetry(hashes, attempt+1)
-		} else {
-			metrics.AdvertisementFailures.Add(float64(len(hashes)))
-			slog.Warn("chunk advertisement failed after retries", "count", len(hashes), "err", err)
-		}
-		return err
-	}
-	metrics.AdvertisementSuccess.Add(float64(len(hashes)))
-	metrics.AdvertisementQueueDepth.Sub(float64(len(hashes)))
-	return nil
-}
-
-func (a *advertiser) stop() {
-	if a == nil {
-		return
-	}
-	close(a.done)
-	<-a.finished
 }
 
 func (e *Engine) Sync(ctx context.Context, jobID string, manifest *v1.ArtifactManifest, destDir string, origin source.Source) (*SyncMetrics, error) {
@@ -499,7 +332,7 @@ func (e *Engine) Sync(ctx context.Context, jobID string, manifest *v1.ArtifactMa
 	var cacheBytesReused int64
 	for _, fileEntry := range manifest.Files {
 		for _, chunkRef := range fileEntry.Chunks {
-			if e.cache.HasChunk(chunkRef.Hash) {
+			if e.cache.HasValidCommittedChunk(chunkRef.Hash, chunkRef.Size) {
 				atomic.AddInt64(&job.SkippedChunks, 1)
 				atomic.AddInt64(&cacheBytesReused, chunkRef.Size)
 				metrics.CacheHits.Inc()
@@ -525,6 +358,7 @@ func (e *Engine) Sync(ctx context.Context, jobID string, manifest *v1.ArtifactMa
 	defer func() {
 		metrics.SwarmUniqueSources.Set(0)
 		metrics.SwarmChunksWithPeers.Set(0)
+		metrics.SwarmAvgChunkReplication.Set(0)
 	}()
 	e.refreshLocations(ctx, manifest.ArtifactID, missingHashes, locs)
 	locs.updateSwarmMetrics(missingHashes)
@@ -556,8 +390,9 @@ func (e *Engine) Sync(ctx context.Context, jobID string, manifest *v1.ArtifactMa
 		}()
 	}
 
-	ad := newAdvertiser(e.trackerClient, e.nodeID, e.advertiseCfg, e.retryMax)
-	defer ad.stop()
+	ad := advertise.New(e.trackerClient, e.nodeID, e.advertiseCfg)
+	defer ad.Stop()
+	ad.Reconcile(cache.ManifestCachedHashes(e.cache, manifest))
 
 	if len(missingItems) > 0 {
 		var wg sync.WaitGroup
@@ -600,7 +435,7 @@ func (e *Engine) Sync(ctx context.Context, jobID string, manifest *v1.ArtifactMa
 						atomic.AddInt64(&job.OriginBytes, n)
 						metrics.OriginBytesDownloaded.Add(float64(n))
 					}
-					ad.enqueue(work.hash)
+					ad.Enqueue(work.hash)
 				}
 			}()
 		}

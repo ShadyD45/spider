@@ -49,6 +49,7 @@ advertisement:
   interval: 100ms
   maxRetries: 5
   retryBackoff: 100ms
+  maxRetryBackoff: 5s
 peerDiscovery:
   refreshInterval: 500ms
 download:

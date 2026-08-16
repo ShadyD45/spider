@@ -168,6 +168,7 @@ advertisement:
   interval: 100ms
   maxRetries: 5
   retryBackoff: 100ms
+  maxRetryBackoff: 5s
 ```
 
 | Knob | Default | Tuning notes |
@@ -175,7 +176,8 @@ advertisement:
 | `batchSize` | `16` | Hashes per `ReportChunks` RPC |
 | `interval` | `100ms` | Max delay before flushing a partial batch |
 | `maxRetries` | `5` | Retries if tracker is temporarily unavailable |
-| `retryBackoff` | `100ms` | Initial backoff; doubles up to `retry.backoff.max` |
+| `retryBackoff` | `100ms` | Initial backoff; doubles up to `maxRetryBackoff` |
+| `maxRetryBackoff` | `5s` | Cap for advertisement retry backoff |
 
 Chunks are **never** advertised until SHA-256 verified and atomically committed to disk.
 
@@ -239,9 +241,14 @@ Exposed on `httpAddr` (default `:9090`) at `/metrics`.
 | `spider_origin_bytes_avoided_total` | Peer + cache reuse (primary savings metric) |
 | `spider_swarm_unique_sources` | Distinct peer sources during active sync |
 | `spider_swarm_chunks_with_peers` | Missing chunks with ≥1 known peer |
-| `spider_swarm_amplification_ratio` | Peer bytes ÷ origin bytes (last sync) |
+| `spider_swarm_avg_chunk_replication` | Average peer sources per missing chunk during sync |
+| `spider_swarm_amplification_ratio` | Peer bytes ÷ origin bytes (last sync; secondary metric) |
+| `spider_upload_bandwidth_limit_mbps` | Configured node-wide upload cap (0 = unlimited) |
+| `spider_fleet_ready_nodes` | Nodes that reported artifact completion (tracker) |
+| `spider_fleet_time_to_ready_seconds{threshold}` | Seconds from `PutArtifact` to readiness (`first`, `50`, `90`, `99`, `100`) |
 | `spider_advertisement_success_total` | Chunk ads acknowledged by tracker |
 | `spider_advertisement_failures_total` | Ads failed after all retries |
+| `spider_advertisement_retries_total` | Advertisement retries scheduled |
 | `spider_advertisement_queue_depth` | Pending hashes waiting to advertise |
 
 **Swarm amplification (PromQL):**
