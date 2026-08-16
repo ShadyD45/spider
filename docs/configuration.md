@@ -340,6 +340,8 @@ S3 origin fallback activates only when `S3_BUCKET` (or `--s3-bucket`) is set.
 
 ## Related docs
 
+- [configuration.md](configuration.md) — YAML reference and tuning profiles
+- [architecture.md](architecture.md) — detailed diagrams and component reference
 - [benchmarks.md](benchmarks.md) — performance methodology and recorded numbers
 - [plans/phase-2-core-reliability-and-hardening.md](plans/phase-2-core-reliability-and-hardening.md) — Phase 2 design notes
 - [plans/00-overview.md](plans/00-overview.md) — roadmap index

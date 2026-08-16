@@ -11,7 +11,7 @@
 
 > **Project status:** Spider is in **early development** — **Phase 2 + 2.5 are complete**, but the project is **not production-ready**. APIs, config, and ops paths may change. Use for evaluation, benchmarking, and contribution only.
 
-**Configuration & tuning:** see **[docs/configuration.md](docs/configuration.md)** for every YAML knob, env var, and recommended profiles.
+**Configuration & tuning:** **[docs/configuration.md](docs/configuration.md)** · **Architecture (detailed):** **[docs/architecture.md](docs/architecture.md)**
 
 **Spider** is a high-throughput, content-addressed, topology-aware P2P distribution mesh designed to distribute massive immutable artifacts (LLM/ML models, datasets, binaries, containers, and directory trees) across large compute fleets while drastically reducing origin storage (S3/MinIO) network traffic.
 
@@ -46,7 +46,7 @@ flowchart TB
   end
 
   subgraph control_plane [Control Plane — metadata only]
-    Tracker["tracker\npkg/tracker"]
+    Tracker["tracker"]
     Store[("store\nSQLite / Postgres")]
     MetaCache[("metaCache\nmemory / Redis")]
     Tracker --> Store
@@ -54,129 +54,26 @@ flowchart TB
   end
 
   subgraph data_plane [Data Plane — bytes never through tracker]
-    SpiderdA["spiderd\nworker A"]
-    SpiderdB["spiderd\nworker B"]
-    SpiderdC["spiderd\nworker C"]
-    ChunkStoreA[("chunkCache\ncontent-addressed disk")]
-    ChunkStoreB[("chunkCache")]
-    ChunkStoreC[("chunkCache")]
-    SpiderdA --- ChunkStoreA
-    SpiderdB --- ChunkStoreB
-    SpiderdC --- ChunkStoreC
-    SpiderdA <-->|"gRPC GetChunk\nstreaming 64KiB frames"| SpiderdB
-    SpiderdB <-->|"P2P mesh"| SpiderdC
-    SpiderdA <-->|"P2P mesh"| SpiderdC
+    SpiderdA["spiderd worker A"]
+    SpiderdB["spiderd worker B"]
+    SpiderdC["spiderd worker C"]
+    SpiderdA <-->|"gRPC P2P mesh"| SpiderdB
+    SpiderdB <-->|"gRPC P2P mesh"| SpiderdC
   end
 
   subgraph clients [Operators]
-    Spiderctl["spiderctl\npublish / sync / verify"]
+    Spiderctl["spiderctl"]
   end
 
-  Origin -->|"fallback read\norigin.maxConcurrency"| SpiderdA
-  Origin --> SpiderdB
-  Spiderctl -->|"Register / Locate / ReportChunks"| Tracker
-  SpiderdA -->|"heartbeat + chunk ads"| Tracker
+  Origin -->|"fallback"| SpiderdA
+  Spiderctl --> Tracker
+  SpiderdA --> Tracker
   SpiderdB --> Tracker
   SpiderdC --> Tracker
   Spiderctl --> SpiderdA
 ```
 
-### How a sync works
-
-```mermaid
-sequenceDiagram
-  participant Op as spiderctl
-  participant Tr as tracker
-  participant Seed as spiderd seed
-  participant Leech as spiderd leecher
-  participant Org as origin
-
-  Op->>Seed: publish manifest + cache chunks
-  Seed->>Tr: ReportChunks + ReportArtifact
-  Op->>Leech: sync manifest
-  Leech->>Tr: LocateArtifact + LocateChunks
-  Tr-->>Leech: peer list per chunk
-  loop missing chunks rarest-first
-    Leech->>Seed: GetChunk stream
-    Seed-->>Leech: verified bytes
-    Leech->>Leech: AppendPartial + CommitPartial
-    Leech->>Tr: ReportChunks batch
-  end
-  Note over Leech,Org: If no peer available
-  Leech->>Org: ReadChunkTo stream
-  Leech->>Leech: materialize to dest path
-```
-
-### Component map
-
-```mermaid
-flowchart LR
-  subgraph binaries [Binaries]
-    T[tracker]
-    D[spiderd]
-    C[spiderctl]
-  end
-
-  subgraph engine_pkg [pkg/engine]
-    Sync[Sync scheduler]
-    Pub[Publisher]
-    Ad[Advertiser batch+retry]
-  end
-
-  subgraph peer_pkg [pkg/peer]
-    Srv[GetChunk server\nupload limits + bandwidth]
-    Pool[ClientPool\neviction]
-  end
-
-  subgraph support [Supporting packages]
-    Sch[scheduler\nEWMA RTT + throughput]
-    Cache[cache ChunkStore]
-    Sched[scheduler rarest-first]
-    Met[metrics Prometheus]
-  end
-
-  C --> D
-  D --> Sync
-  Sync --> Sch
-  Sync --> Pool
-  Sync --> Cache
-  Sync --> Ad
-  D --> Srv
-  T --> Met
-  D --> Met
-  Ad --> T
-  Pool --> Srv
-```
-
-### Phase 2 + 2.5 design (current)
-
-| Layer | Package / binary | Role |
-| :--- | :--- | :--- |
-| **Config** | `pkg/config`, [`spider.yaml`](spider.yaml), [`docs/configuration.md`](docs/configuration.md) | All knobs: store, caches, download/upload, ads, retries, peer client pool |
-| **Tracker store** | `pkg/store` | Durable peers, artifact seeds, sparse chunk index (SQLite WAL default; Postgres via DSN) |
-| **Tracker meta cache** | `pkg/metacache` | Optional Redis/memory/`none` fronting store reads |
-| **Scheduler** | `pkg/scheduler` | Locality rank, EWMA RTT **+ throughput**, rarest-first, inflight caps, circuit breaker |
-| **Engine** | `pkg/engine` | Batched chunk ads with retry, live peer refresh + stale reconciliation, streaming ingest, origin fallback |
-| **Chunk store** | `pkg/cache` (`ChunkStore`, `QuotaManager`) | Content-addressed files, resumable partials, refcounted LRU pins |
-| **Peer transport** | `pkg/peer` | gRPC streaming, **node-wide upload bandwidth** (`golang.org/x/time/rate`), connection pool lifecycle |
-| **Observability** | `pkg/metrics`, `pkg/httpserver` | Origin/peer/cache/swarm metrics; health/readiness on tracker and workers |
-| **Build / deploy** | `scripts/build-binaries.*`, `Containerfile` | Cross-compile on host → slim Alpine runtime image (`localhost/spider:local`) |
-
-Bring-your-own tracker backends (YAML, flags, or `SPIDER_*` env). Combinations are independent:
-
-```yaml
-store:
-  driver: postgres
-  dsn: ${SPIDER_STORE_DSN}   # postgres://user:pass@db.example:5432/spider?sslmode=require
-metaCache:
-  driver: redis              # or none
-  redis:
-    url: ${SPIDER_CACHE_REDIS_URL}
-```
-
-`cache:` / `diskCache:` remain valid aliases for `metaCache` / `chunkCache`. Tracker never stores artifact bytes — `spiderd` keeps chunks on local disk.
-
-Publish registers chunks and seeds under `--node-id` (not a anonymous `"publisher"` id). S3/MinIO origin fallback is enabled only when `S3_BUCKET` is explicitly set — not from endpoint env alone.
+**Detailed diagrams** (sync lifecycle, component map, chunk data path, scheduler): **[docs/architecture.md](docs/architecture.md)**
 
 ### Configuration summary
 
@@ -206,6 +103,8 @@ Full reference: **[docs/configuration.md](docs/configuration.md)**
 3. **Content Addressing & Verification**: Every chunk is addressed by cryptographic hash (`sha256:<hex>`). Chunks are atomically verified before committing to cache or advertising to the mesh.
 4. **Topology-Aware Proximity**: Peering scheduler prefers candidate nodes ranked by network distance (`Host` > `Rack` > `Zone` > `Region` > `Remote`).
 5. **Standalone Engine with Optional Orchestration**: Runs standalone on bare metal, containers, or VMs with zero external dependencies, while providing clean extension points for Kubernetes CRDs and operators.
+
+See [docs/architecture.md](docs/architecture.md) for sync flow, component map, and layer reference.
 
 ---
 
