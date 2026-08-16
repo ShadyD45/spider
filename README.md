@@ -9,7 +9,7 @@
 [![Architecture](https://img.shields.io/badge/Architecture-P2P%20Mesh-orange.svg)](#architecture)
 [![Status](https://img.shields.io/badge/Status-Early%20Development-yellow.svg)](#project-status)
 
-> **Project status:** Spider is in **early development** — Phase 2 hardening is largely implemented, but the project is **not production-ready**. APIs, config, and ops paths may change. Use for evaluation, benchmarking, and contribution only.
+> **Project status:** Spider is in **early development** — **Phase 2 is complete**, but the project is **not production-ready**. APIs, config, and ops paths may change. Use for evaluation, benchmarking, and contribution only.
 
 **Spider** is a high-throughput, content-addressed, topology-aware P2P distribution mesh designed to distribute massive immutable artifacts (LLM/ML models, datasets, binaries, containers, and directory trees) across large compute fleets while drastically reducing origin storage (S3/MinIO) network traffic.
 
@@ -63,14 +63,28 @@ Grafana (after compose benchmark; on Podman Desktop for Windows use the [Podman 
 
 | Layer | Package / binary | Role |
 | :--- | :--- | :--- |
-| **Config** | `pkg/config`, `spider.yaml` | Store/cache drivers, pool tuning, disk cache watermarks, slog format |
-| **Tracker store** | `pkg/store` | Durable peers, artifact seeds, sparse chunk index (SQLite WAL default) |
-| **Tracker cache** | `pkg/metacache` | Optional Redis/memory fronting store reads |
+| **Config** | `pkg/config`, `spider.yaml` | Store + `metaCache` (Redis/memory/none) + `chunkCache`, advertisement, upload/download limits |
+| **Tracker store** | `pkg/store` | Durable peers, artifact seeds, sparse chunk index (SQLite WAL default; Postgres via DSN) |
+| **Tracker meta cache** | `pkg/metacache` | Optional Redis/memory/`none` fronting store reads |
 | **Scheduler** | `pkg/scheduler` | Locality rank, EWMA RTT, rarest-first, inflight caps, circuit breaker |
-| **Engine** | `pkg/engine` | Concurrent sync; peer fetch with inflight wait; origin fallback when configured |
-| **Cache manager** | `pkg/cache` | Refcounted LRU, pin/unpin, high/low watermarks |
+| **Engine** | `pkg/engine` | Immediate chunk ads, live peer refresh, streaming ingest, origin fallback |
+| **Chunk store** | `pkg/cache` (`ChunkStore`, `QuotaManager`) | Content-addressed files, resumable partials, refcounted LRU pins |
 | **Observability** | `pkg/metrics`, `pkg/httpserver` | Prometheus metrics; health/readiness on tracker and workers |
 | **Build / deploy** | `scripts/build-binaries.*`, `Containerfile` | Cross-compile on host → slim Alpine runtime image (`localhost/spider:local`) |
+
+Bring-your-own tracker backends (YAML, flags, or `SPIDER_*` env). Combinations are independent:
+
+```yaml
+store:
+  driver: postgres
+  dsn: ${SPIDER_STORE_DSN}   # postgres://user:pass@db.example:5432/spider?sslmode=require
+metaCache:
+  driver: redis              # or none
+  redis:
+    url: ${SPIDER_CACHE_REDIS_URL}
+```
+
+`cache:` / `diskCache:` remain valid aliases for `metaCache` / `chunkCache`. Tracker never stores artifact bytes — `spiderd` keeps chunks on local disk.
 
 Publish registers chunks and seeds under `--node-id` (not a anonymous `"publisher"` id). S3/MinIO origin fallback is enabled only when `S3_BUCKET` is explicitly set — not from endpoint env alone.
 
@@ -277,7 +291,7 @@ Numbers and interpretation caveats: [docs/benchmarks.md](docs/benchmarks.md).
 | Phase | Plan Document | Status | Focus |
 |---|---|---|---|
 | **Phase 1** | [`01-poc-and-podman`](docs/plans/phase-1-poc-and-podman-environment.md) | ✅ **Complete** | Core Go primitives, gRPC chunk streaming, tracker, atomic cache, CLI, and benchmark harness. |
-| **Phase 2** | [`02-core-reliability`](docs/plans/phase-2-core-reliability-and-hardening.md) | 🚧 **In progress** | Pluggable Store+Cache (SQLite/Postgres, memory/Redis), seed locate, swarm scheduler, refcounted LRU pins, Prometheus/health, YAML. Implemented; hardening and docs ongoing. |
+| **Phase 2** | [`02-core-reliability`](docs/plans/phase-2-core-reliability-and-hardening.md) | ✅ **Complete** | Pluggable Store + metaCache (SQLite/Postgres, memory/Redis/none), seed locate, swarm scheduler, streaming chunk store, immediate ads, Prometheus/health, YAML. |
 | **Phase 3** | [`03-security-auth`](docs/plans/phase-3-security-and-authorization.md) | 📋 Planned | Mutual TLS (mTLS), Ed25519 signed manifests, RBAC, path traversal policies. |
 | **Phase 4** | [`04-k8s-operator`](docs/plans/phase-4-kubernetes-operator-and-crds.md) | 📋 Planned | `ArtifactDeployment` CRD, Kubernetes Operator (`cmd/controller`), `spiderd` DaemonSet manifests. |
 | **Phase 5** | [`05-scale-transports`](docs/plans/phase-5-multi-region-scale-and-transports.md) | 📋 Planned | Multi-region hierarchical control plane, zero-copy `splice` streaming, FastCDC chunking. |

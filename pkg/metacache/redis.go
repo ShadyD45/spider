@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"runtime"
+	"strings"
 	"time"
 
 	"github.com/redis/go-redis/v9"
@@ -22,11 +23,34 @@ type Redis struct {
 	ttl    time.Duration
 }
 
-// NewRedis connects to Redis with a bounded connection pool.
-func NewRedis(opts Options) (*Redis, error) {
-	addr := opts.Addr
-	if addr == "" {
-		addr = "127.0.0.1:6379"
+func redisClientOptions(opts Options) (*redis.Options, error) {
+	target := opts.URL
+	if target == "" {
+		target = opts.Addr
+	}
+	var ro *redis.Options
+	if strings.Contains(target, "://") {
+		parsed, err := redis.ParseURL(target)
+		if err != nil {
+			return nil, fmt.Errorf("parse redis url: %w", err)
+		}
+		ro = parsed
+	} else {
+		addr := target
+		if addr == "" {
+			addr = "127.0.0.1:6379"
+		}
+		ro = &redis.Options{
+			Addr:     addr,
+			Password: opts.Password,
+			DB:       opts.DB,
+		}
+	}
+	if opts.Password != "" {
+		ro.Password = opts.Password
+	}
+	if opts.DB != 0 {
+		ro.DB = opts.DB
 	}
 	p := opts.Pool
 	poolSize := p.MaxOpenConns
@@ -67,25 +91,34 @@ func NewRedis(opts Options) (*Redis, error) {
 	if idleTime <= 0 {
 		idleTime = 5 * time.Minute
 	}
-	c := redis.NewClient(&redis.Options{
-		Addr:            addr,
-		Password:        opts.Password,
-		DB:              opts.DB,
-		PoolSize:        poolSize,
-		MinIdleConns:    minIdle,
-		MaxIdleConns:    maxIdle,
-		DialTimeout:     dial,
-		ReadTimeout:     read,
-		WriteTimeout:    write,
-		PoolTimeout:     poolTimeout,
-		ConnMaxLifetime: p.ConnMaxLifetime,
-		ConnMaxIdleTime: idleTime,
-	})
+	ro.PoolSize = poolSize
+	ro.MinIdleConns = minIdle
+	ro.MaxIdleConns = maxIdle
+	ro.DialTimeout = dial
+	ro.ReadTimeout = read
+	ro.WriteTimeout = write
+	ro.PoolTimeout = poolTimeout
+	ro.ConnMaxLifetime = p.ConnMaxLifetime
+	ro.ConnMaxIdleTime = idleTime
+	return ro, nil
+}
+
+// NewRedis connects to Redis with a bounded connection pool.
+func NewRedis(opts Options) (*Redis, error) {
+	ro, err := redisClientOptions(opts)
+	if err != nil {
+		return nil, err
+	}
+	c := redis.NewClient(ro)
+	dial := ro.DialTimeout
+	if dial <= 0 {
+		dial = 3 * time.Second
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), dial)
 	defer cancel()
 	if err := c.Ping(ctx).Err(); err != nil {
 		_ = c.Close()
-		return nil, fmt.Errorf("redis ping %s: %w", addr, err)
+		return nil, fmt.Errorf("redis ping %s: %w", ro.Addr, err)
 	}
 	prefix := opts.Prefix
 	if prefix == "" {

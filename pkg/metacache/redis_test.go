@@ -48,3 +48,20 @@ func TestMemoryTTLExpiry(t *testing.T) {
 		t.Fatalf("expected ttl miss ok=%v err=%v", ok, err)
 	}
 }
+
+func TestRedisURLParse(t *testing.T) {
+	mr := miniredis.RunT(t)
+	c, err := NewRedis(Options{URL: "redis://" + mr.Addr(), TTL: time.Minute, Prefix: "spider:"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = c.Close() })
+	ctx := context.Background()
+	if err := c.Set(ctx, "k", []byte("v"), time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	got, ok, err := c.Get(ctx, "k")
+	if err != nil || !ok || string(got) != "v" {
+		t.Fatalf("url get ok=%v err=%v val=%s", ok, err, got)
+	}
+}

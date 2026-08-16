@@ -2,6 +2,7 @@ package scheduler
 
 import (
 	"context"
+	"sort"
 	"sync"
 	"time"
 
@@ -70,18 +71,27 @@ func (s *Scheduler) RankPeers(self topology.Locality, peers []*proto.PeerInfo) [
 	if len(pool) == 0 {
 		pool = untrusted
 	}
-	topology.SortPeersByProximity(self, pool)
-	// Stable secondary: prefer lower inflight and RTT within same topology bucket
-	// SortPeersByProximity already stable by node id; refine with a second pass grouping.
-	s.sortLoad(pool)
+	s.sortLoad(self, pool)
 	return pool
 }
 
-func (s *Scheduler) sortLoad(peers []*proto.PeerInfo) {
-	// insertion-style: among equal topology distance, lower inflight/RTT first.
-	// Distance is not stored; we re-sort only by inflight+RTT while preserving topology groups
-	// by using a simple bubble on adjacent pairs with same host/rack... skip — inflight gate is enough.
-	_ = peers
+func (s *Scheduler) sortLoad(self topology.Locality, peers []*proto.PeerInfo) {
+	sort.SliceStable(peers, func(i, j int) bool {
+		di := topology.Distance(self, topology.FromProto(peers[i]))
+		dj := topology.Distance(self, topology.FromProto(peers[j]))
+		if di != dj {
+			return di < dj
+		}
+		si := s.stat(peers[i].Address)
+		sj := s.stat(peers[j].Address)
+		if si.Inflight != sj.Inflight {
+			return si.Inflight < sj.Inflight
+		}
+		if si.RTT != sj.RTT {
+			return si.RTT < sj.RTT
+		}
+		return peers[i].NodeId < peers[j].NodeId
+	})
 }
 
 func (s *Scheduler) Begin(addr string) bool {

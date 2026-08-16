@@ -12,6 +12,7 @@ service PeerService {
 
 message GetChunkRequest {
   string chunk_hash = 1;
+  int64 offset = 2;
 }
 
 message ChunkDataChunk {

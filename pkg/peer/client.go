@@ -12,10 +12,11 @@ import (
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/metadata"
 	"spider/api/v1/proto"
 )
 
-// Client pool manages gRPC connections to mesh peers.
+// ClientPool manages gRPC connections to mesh peers.
 type ClientPool struct {
 	mu    sync.RWMutex
 	conns map[string]*grpc.ClientConn
@@ -69,49 +70,73 @@ func (p *ClientPool) Close() {
 	p.conns = make(map[string]*grpc.ClientConn)
 }
 
-// DownloadChunk streams a complete chunk from a peer and verifies its SHA-256 integrity.
-func (p *ClientPool) DownloadChunk(ctx context.Context, peerAddress string, chunkHash string) ([]byte, error) {
+// DownloadChunkTo streams chunk bytes starting at offset into w. Hash is verified by the chunk store, not here.
+func (p *ClientPool) DownloadChunkTo(ctx context.Context, peerAddress, chunkHash string, offset int64, w io.Writer) (int64, error) {
 	client, err := p.GetClient(ctx, peerAddress)
 	if err != nil {
-		return nil, err
+		return 0, err
 	}
 
+	if offset > 0 {
+		ctx = metadata.AppendToOutgoingContext(ctx, "x-chunk-offset", fmt.Sprintf("%d", offset))
+	}
 	stream, err := client.GetChunk(ctx, &proto.GetChunkRequest{
 		ChunkHash: chunkHash,
+		Offset:    offset,
 	})
 	if err != nil {
-		return nil, fmt.Errorf("peer GetChunk RPC failed: %w", err)
+		return 0, fmt.Errorf("peer GetChunk RPC failed: %w", err)
 	}
 
-	hasher := sha256.New()
-	var buf bytes.Buffer
-	mw := io.MultiWriter(&buf, hasher)
-
+	var totalSize int64
+	var skipped int64
 	for {
 		chunkData, err := stream.Recv()
 		if err == io.EOF {
 			break
 		}
 		if err != nil {
-			return nil, fmt.Errorf("error reading chunk stream from %s: %w", peerAddress, err)
+			return totalSize, fmt.Errorf("error reading chunk stream from %s: %w", peerAddress, err)
 		}
-
-		if len(chunkData.Payload) > 0 {
-			if _, err := mw.Write(chunkData.Payload); err != nil {
-				return nil, fmt.Errorf("failed to write buffer: %w", err)
+		if chunkData.TotalSize > 0 {
+			totalSize = chunkData.TotalSize
+		}
+		payload := chunkData.Payload
+		if offset > 0 && chunkData.GetOffset() == 0 && skipped < offset {
+			need := offset - skipped
+			if int64(len(payload)) <= need {
+				skipped += int64(len(payload))
+				if chunkData.IsEof {
+					break
+				}
+				continue
+			}
+			payload = payload[need:]
+			skipped = offset
+		}
+		if len(payload) > 0 {
+			if _, err := w.Write(payload); err != nil {
+				return totalSize, fmt.Errorf("failed to write chunk stream: %w", err)
 			}
 		}
-
 		if chunkData.IsEof {
 			break
 		}
 	}
+	return totalSize, nil
+}
 
-	receivedBytes := buf.Bytes()
+// DownloadChunk streams a complete chunk from a peer and verifies SHA-256 (offset 0 only).
+func (p *ClientPool) DownloadChunk(ctx context.Context, peerAddress string, chunkHash string) ([]byte, error) {
+	var buf bytes.Buffer
+	hasher := sha256.New()
+	mw := io.MultiWriter(&buf, hasher)
+	if _, err := p.DownloadChunkTo(ctx, peerAddress, chunkHash, 0, mw); err != nil {
+		return nil, err
+	}
 	actualHash := "sha256:" + hex.EncodeToString(hasher.Sum(nil))
 	if actualHash != chunkHash {
 		return nil, fmt.Errorf("chunk corruption detected from peer %s: expected %s, got %s", peerAddress, chunkHash, actualHash)
 	}
-
-	return receivedBytes, nil
+	return buf.Bytes(), nil
 }

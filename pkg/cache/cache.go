@@ -2,6 +2,8 @@ package cache
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -9,7 +11,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"sync"
 
 	v1 "spider/api/v1"
 	"spider/pkg/chunk"
@@ -19,31 +20,36 @@ var (
 	ErrChunkNotFound   = errors.New("chunk not found in cache")
 	ErrHashMismatch    = errors.New("chunk content hash mismatch")
 	ErrInvalidHashName = errors.New("invalid chunk hash format")
+	ErrIncomplete      = errors.New("chunk partial is incomplete")
 )
 
-// Cache manages the disk-backed content-addressed store.
-type Cache struct {
-	rootDir   string
-	chunksDir string
-	tmpDir    string
-	mfstDir   string
-	mu        sync.RWMutex
+// ChunkStore manages the disk-backed content-addressed chunk store.
+type ChunkStore struct {
+	rootDir    string
+	chunksDir  string
+	tmpDir     string
+	partialDir string
+	mfstDir    string
 }
 
-// NewCache initializes cache directories at rootDir.
-func NewCache(rootDir string) (*Cache, error) {
+// Cache is a compatibility alias for ChunkStore.
+type Cache = ChunkStore
+
+// NewChunkStore initializes chunk store directories at rootDir.
+func NewChunkStore(rootDir string) (*ChunkStore, error) {
 	if rootDir == "" {
 		rootDir = "/var/lib/spider"
 	}
 
-	c := &Cache{
-		rootDir:   rootDir,
-		chunksDir: filepath.Join(rootDir, "chunks", "sha256"),
-		tmpDir:    filepath.Join(rootDir, "tmp"),
-		mfstDir:   filepath.Join(rootDir, "manifests"),
+	c := &ChunkStore{
+		rootDir:    rootDir,
+		chunksDir:  filepath.Join(rootDir, "chunks", "sha256"),
+		tmpDir:     filepath.Join(rootDir, "tmp"),
+		partialDir: filepath.Join(rootDir, "tmp", "partial"),
+		mfstDir:    filepath.Join(rootDir, "manifests"),
 	}
 
-	for _, dir := range []string{c.chunksDir, c.tmpDir, c.mfstDir} {
+	for _, dir := range []string{c.chunksDir, c.tmpDir, c.partialDir, c.mfstDir} {
 		if err := os.MkdirAll(dir, 0755); err != nil {
 			return nil, fmt.Errorf("failed to create cache directory %s: %w", dir, err)
 		}
@@ -52,7 +58,11 @@ func NewCache(rootDir string) (*Cache, error) {
 	return c, nil
 }
 
-// parseHash extracts the 64-character hex part from "sha256:<hex>".
+// NewCache is a compatibility alias for NewChunkStore.
+func NewCache(rootDir string) (*ChunkStore, error) {
+	return NewChunkStore(rootDir)
+}
+
 func parseHash(hash string) (string, error) {
 	if !strings.HasPrefix(hash, "sha256:") {
 		return "", ErrInvalidHashName
@@ -64,8 +74,7 @@ func parseHash(hash string) (string, error) {
 	return hexPart, nil
 }
 
-// chunkPath returns the hierarchical filesystem path for a chunk hash (e.g. chunks/sha256/ab/abcdef...).
-func (c *Cache) chunkPath(hash string) (string, error) {
+func (c *ChunkStore) chunkPath(hash string) (string, error) {
 	hexPart, err := parseHash(hash)
 	if err != nil {
 		return "", err
@@ -74,8 +83,16 @@ func (c *Cache) chunkPath(hash string) (string, error) {
 	return filepath.Join(c.chunksDir, shard, hexPart), nil
 }
 
-// HasChunk checks if a verified chunk exists in cache.
-func (c *Cache) HasChunk(hash string) bool {
+func (c *ChunkStore) partialPath(hash string) (string, error) {
+	hexPart, err := parseHash(hash)
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(c.partialDir, hexPart), nil
+}
+
+// HasChunk checks if a verified chunk exists in the store.
+func (c *ChunkStore) HasChunk(hash string) bool {
 	p, err := c.chunkPath(hash)
 	if err != nil {
 		return false
@@ -84,11 +101,11 @@ func (c *Cache) HasChunk(hash string) bool {
 	return err == nil && !info.IsDir()
 }
 
-// RootDir returns the cache root.
-func (c *Cache) RootDir() string { return c.rootDir }
+// RootDir returns the store root.
+func (c *ChunkStore) RootDir() string { return c.rootDir }
 
-// GetChunkPath returns the absolute path to a chunk file if it exists.
-func (c *Cache) GetChunkPath(hash string) (string, error) {
+// GetChunkPath returns the absolute path to a committed chunk file if it exists.
+func (c *ChunkStore) GetChunkPath(hash string) (string, error) {
 	p, err := c.chunkPath(hash)
 	if err != nil {
 		return "", err
@@ -102,8 +119,8 @@ func (c *Cache) GetChunkPath(hash string) (string, error) {
 	return p, nil
 }
 
-// GetChunkReader opens a chunk file for reading and returns its size.
-func (c *Cache) GetChunkReader(hash string) (io.ReadCloser, int64, error) {
+// GetChunkReader opens a committed chunk for reading (seekable).
+func (c *ChunkStore) GetChunkReader(hash string) (io.ReadSeekCloser, int64, error) {
 	p, err := c.chunkPath(hash)
 	if err != nil {
 		return nil, 0, err
@@ -126,76 +143,131 @@ func (c *Cache) GetChunkReader(hash string) (io.ReadCloser, int64, error) {
 	return f, info.Size(), nil
 }
 
-// PutChunk stores byte slice atomically, strictly verifying SHA-256 of the bytes on disk before commit.
-func (c *Cache) PutChunk(hash string, data []byte) error {
-	if _, err := parseHash(hash); err != nil {
+// PartialSize returns durable bytes already written for an incomplete chunk.
+func (c *ChunkStore) PartialSize(hash string) int64 {
+	p, err := c.partialPath(hash)
+	if err != nil {
+		return 0
+	}
+	info, err := os.Stat(p)
+	if err != nil || info.IsDir() {
+		return 0
+	}
+	return info.Size()
+}
+
+// DiscardPartial removes an incomplete download for hash.
+func (c *ChunkStore) DiscardPartial(hash string) error {
+	p, err := c.partialPath(hash)
+	if err != nil {
 		return err
 	}
+	if err := os.Remove(p); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	return nil
+}
+
+// PutChunk stores a byte slice atomically after verifying SHA-256.
+func (c *ChunkStore) PutChunk(hash string, data []byte) error {
 	return c.PutChunkFromReader(hash, bytes.NewReader(data))
 }
 
-// PutChunkFromReader streams data from reader, writes to tmp, re-hashes the on-disk bytes, and atomically commits.
-func (c *Cache) PutChunkFromReader(hash string, r io.Reader) error {
+// PutChunkFromReader replaces any partial, streams to a hash-named file, verifies, and commits.
+func (c *ChunkStore) PutChunkFromReader(hash string, r io.Reader) error {
+	if err := c.DiscardPartial(hash); err != nil {
+		return err
+	}
+	if err := c.AppendPartial(hash, r); err != nil {
+		_ = c.DiscardPartial(hash)
+		return err
+	}
+	return c.CommitPartial(hash)
+}
+
+// AppendPartial appends reader bytes onto the hash-named partial file (no global lock).
+func (c *ChunkStore) AppendPartial(hash string, r io.Reader) error {
 	if _, err := parseHash(hash); err != nil {
 		return err
 	}
+	p, err := c.partialPath(hash)
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(p), 0755); err != nil {
+		return err
+	}
+	f, err := os.OpenFile(p, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+	if err != nil {
+		return fmt.Errorf("open partial: %w", err)
+	}
+	if _, err := io.Copy(f, r); err != nil {
+		_ = f.Close()
+		return fmt.Errorf("write partial: %w", err)
+	}
+	if err := f.Sync(); err != nil {
+		_ = f.Close()
+		return fmt.Errorf("sync partial: %w", err)
+	}
+	return f.Close()
+}
 
-	c.mu.Lock()
-	defer c.mu.Unlock()
+// CommitPartial verifies the full partial against hash and atomically inserts it into the CAS.
+func (c *ChunkStore) CommitPartial(hash string) error {
+	if _, err := parseHash(hash); err != nil {
+		return err
+	}
+	p, err := c.partialPath(hash)
+	if err != nil {
+		return err
+	}
+	onDisk, err := os.Open(p)
+	if err != nil {
+		return fmt.Errorf("open partial for verify: %w", err)
+	}
+	actual, _, err := chunk.ComputeReaderHash(onDisk)
+	_ = onDisk.Close()
+	if err != nil {
+		return fmt.Errorf("hash partial: %w", err)
+	}
+	if actual != hash {
+		_ = os.Remove(p)
+		return fmt.Errorf("%w: expected %s, computed %s", ErrHashMismatch, hash, actual)
+	}
 
 	destPath, err := c.chunkPath(hash)
 	if err != nil {
 		return err
 	}
-
 	if err := os.MkdirAll(filepath.Dir(destPath), 0755); err != nil {
 		return fmt.Errorf("failed to create shard directory: %w", err)
 	}
-
-	tmpFile, err := os.CreateTemp(c.tmpDir, "chunk-*")
-	if err != nil {
-		return fmt.Errorf("failed to create temp file: %w", err)
-	}
-	tmpName := tmpFile.Name()
-	defer func() {
-		_ = os.Remove(tmpName)
-	}()
-
-	if _, err := io.Copy(tmpFile, r); err != nil {
-		tmpFile.Close()
-		return fmt.Errorf("failed to copy chunk stream: %w", err)
-	}
-	if err := tmpFile.Sync(); err != nil {
-		tmpFile.Close()
-		return fmt.Errorf("failed to sync temp chunk: %w", err)
-	}
-	if err := tmpFile.Close(); err != nil {
-		return fmt.Errorf("failed to close temp file: %w", err)
-	}
-
-	// Re-hash the written file so commit is based on durable bytes, not the in-memory buffer.
-	onDisk, err := os.Open(tmpName)
-	if err != nil {
-		return fmt.Errorf("failed to reopen temp chunk for verification: %w", err)
-	}
-	actual, _, err := chunk.ComputeReaderHash(onDisk)
-	_ = onDisk.Close()
-	if err != nil {
-		return fmt.Errorf("failed to hash temp chunk: %w", err)
-	}
-	if actual != hash {
-		return fmt.Errorf("%w: expected %s, computed %s", ErrHashMismatch, hash, actual)
-	}
-
-	if err := os.Rename(tmpName, destPath); err != nil {
+	if err := os.Rename(p, destPath); err != nil {
 		return fmt.Errorf("failed to move chunk to cache: %w", err)
 	}
-
 	return nil
 }
 
-// SaveManifest persists an artifact manifest to cache/manifests/<artifact_id>.json.
-func (c *Cache) SaveManifest(m *v1.ArtifactManifest) error {
+// HashPartial returns the SHA-256 of the current partial file.
+func (c *ChunkStore) HashPartial(hash string) (string, error) {
+	p, err := c.partialPath(hash)
+	if err != nil {
+		return "", err
+	}
+	f, err := os.Open(p)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return "", err
+	}
+	return "sha256:" + hex.EncodeToString(h.Sum(nil)), nil
+}
+
+// SaveManifest persists an artifact manifest to manifests/<artifact_id>.json.
+func (c *ChunkStore) SaveManifest(m *v1.ArtifactManifest) error {
 	if err := m.Validate(); err != nil {
 		return fmt.Errorf("cannot save invalid manifest: %w", err)
 	}
@@ -209,9 +281,6 @@ func (c *Cache) SaveManifest(m *v1.ArtifactManifest) error {
 	if err != nil {
 		return fmt.Errorf("failed to marshal manifest: %w", err)
 	}
-
-	c.mu.Lock()
-	defer c.mu.Unlock()
 
 	dest := filepath.Join(c.mfstDir, hexPart+".json")
 	tmpFile, err := os.CreateTemp(c.tmpDir, "manifest-*")
@@ -232,15 +301,12 @@ func (c *Cache) SaveManifest(m *v1.ArtifactManifest) error {
 	return os.Rename(tmpName, dest)
 }
 
-// GetManifest loads an artifact manifest from cache.
-func (c *Cache) GetManifest(artifactID string) (*v1.ArtifactManifest, error) {
+// GetManifest loads an artifact manifest from the store.
+func (c *ChunkStore) GetManifest(artifactID string) (*v1.ArtifactManifest, error) {
 	hexPart, err := parseHash(artifactID)
 	if err != nil {
 		return nil, err
 	}
-
-	c.mu.RLock()
-	defer c.mu.RUnlock()
 
 	dest := filepath.Join(c.mfstDir, hexPart+".json")
 	data, err := os.ReadFile(dest)
@@ -251,11 +317,8 @@ func (c *Cache) GetManifest(artifactID string) (*v1.ArtifactManifest, error) {
 	return v1.ParseManifest(data)
 }
 
-// ListChunks returns all verified chunk hashes currently stored in the cache.
-func (c *Cache) ListChunks() ([]string, error) {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-
+// ListChunks returns all verified chunk hashes currently stored.
+func (c *ChunkStore) ListChunks() ([]string, error) {
 	var hashes []string
 	err := filepath.Walk(c.chunksDir, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
@@ -273,11 +336,8 @@ func (c *Cache) ListChunks() ([]string, error) {
 	return hashes, err
 }
 
-// TotalCachedBytes calculates total bytes used by chunk files.
-func (c *Cache) TotalCachedBytes() (int64, error) {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-
+// TotalCachedBytes calculates total bytes used by committed chunk files.
+func (c *ChunkStore) TotalCachedBytes() (int64, error) {
 	var total int64
 	err := filepath.Walk(c.chunksDir, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
@@ -292,11 +352,8 @@ func (c *Cache) TotalCachedBytes() (int64, error) {
 	return total, err
 }
 
-// DeleteChunk removes a chunk from the cache.
-func (c *Cache) DeleteChunk(hash string) error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
+// DeleteChunk removes a committed chunk.
+func (c *ChunkStore) DeleteChunk(hash string) error {
 	p, err := c.chunkPath(hash)
 	if err != nil {
 		return err

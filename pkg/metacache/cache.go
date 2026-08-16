@@ -27,6 +27,7 @@ var (
 // (zero values mean driver defaults).
 type Options struct {
 	TTL      time.Duration
+	URL      string
 	Addr     string
 	Password string
 	DB       int
@@ -47,7 +48,7 @@ type Pool struct {
 	PoolTimeout     time.Duration
 }
 
-// Register a cache driver. Name is cache.driver in YAML. New backends must
+// Register a cache driver. Name is metaCache.driver in YAML. New backends must
 // honor Options.Pool with zero meaning driver defaults.
 func Register(name string, fn opener) {
 	mu.Lock()

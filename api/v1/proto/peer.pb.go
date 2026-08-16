@@ -24,6 +24,7 @@ const (
 type GetChunkRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	ChunkHash     string                 `protobuf:"bytes,1,opt,name=chunk_hash,json=chunkHash,proto3" json:"chunk_hash,omitempty"`
+	Offset        int64                  `protobuf:"varint,2,opt,name=offset,proto3" json:"offset,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -63,6 +64,13 @@ func (x *GetChunkRequest) GetChunkHash() string {
 		return x.ChunkHash
 	}
 	return ""
+}
+
+func (x *GetChunkRequest) GetOffset() int64 {
+	if x != nil {
+		return x.Offset
+	}
+	return 0
 }
 
 type ChunkDataChunk struct {

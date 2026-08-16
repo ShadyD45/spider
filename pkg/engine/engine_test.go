@@ -1,12 +1,15 @@
 package engine
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"io"
 	"net"
 	"os"
 	"path/filepath"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -378,3 +381,141 @@ func TestEngineCancelsOnContext(t *testing.T) {
 	}
 }
 
+func TestAdvertiserFlushesBeforeStop(t *testing.T) {
+	var mu sync.Mutex
+	var reports [][]string
+	client := &reportSpy{onReport: func(hashes []string) {
+		mu.Lock()
+		reports = append(reports, append([]string(nil), hashes...))
+		mu.Unlock()
+	}}
+	ad := newAdvertiser(client, "node-a", 4, 50*time.Millisecond)
+	ad.enqueue("sha256:aa")
+	ad.enqueue("sha256:bb")
+	ad.stop()
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(reports) == 0 {
+		t.Fatal("expected at least one ReportChunks flush before stop")
+	}
+	var all []string
+	for _, batch := range reports {
+		all = append(all, batch...)
+	}
+	if len(all) < 2 {
+		t.Fatalf("expected both hashes reported, got %v", all)
+	}
+}
+
+func TestEngineResumesPartialFromPeer(t *testing.T) {
+	ctx := context.Background()
+	trReg := tracker.NewRegistry(10 * time.Second)
+	trSrv := tracker.NewServer(trReg)
+	trLis, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	grpcTracker := grpc.NewServer()
+	proto.RegisterTrackerServiceServer(grpcTracker, trSrv)
+	go func() { _ = grpcTracker.Serve(trLis) }()
+	defer grpcTracker.Stop()
+
+	trConn, err := grpc.Dial(fmt.Sprintf("127.0.0.1:%d", trLis.Addr().(*net.TCPAddr).Port), grpc.WithInsecure())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer trConn.Close()
+	trClient := proto.NewTrackerServiceClient(trConn)
+
+	originDir := t.TempDir()
+	data := []byte("0123456789ABCDEF" + "GHIJKLMNOPQRSTUV")
+	if err := os.WriteFile(filepath.Join(originDir, "model.bin"), data, 0644); err != nil {
+		t.Fatal(err)
+	}
+	originSrc, err := source.NewFilesystemSource(originDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	seederCache, err := cache.NewCache(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	pub := NewPublisher(seederCache, 16)
+	manifest, err := pub.Publish(ctx, originSrc, "", "resume-model", "1.0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	hashes := manifest.AllChunkHashes()
+	if len(hashes) != 2 {
+		t.Fatalf("expected 2 chunks, got %d", len(hashes))
+	}
+
+	seederLis, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	grpcSeeder := grpc.NewServer()
+	proto.RegisterPeerServiceServer(grpcSeeder, peer.NewServer("seeder", seederCache, nil))
+	go func() { _ = grpcSeeder.Serve(seederLis) }()
+	defer grpcSeeder.Stop()
+
+	seederAddr := fmt.Sprintf("127.0.0.1:%d", seederLis.Addr().(*net.TCPAddr).Port)
+	_, _ = trClient.RegisterPeer(ctx, &proto.RegisterPeerRequest{Peer: &proto.PeerInfo{NodeId: "seeder", Address: seederAddr}})
+	_, _ = trClient.ReportChunks(ctx, &proto.ReportChunksRequest{NodeId: "seeder", ChunkHashes: hashes})
+
+	leecherCache, err := cache.NewCache(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Simulate crash after first half of chunk 0.
+	if err := leecherCache.AppendPartial(hashes[0], bytes.NewReader(data[:16])); err != nil {
+		t.Fatal(err)
+	}
+
+	eng := NewEngine(Config{
+		NodeID:        "leecher",
+		Cache:         leecherCache,
+		TrackerClient: trClient,
+	})
+	metrics, err := eng.Sync(ctx, "resume-job", manifest, filepath.Join(t.TempDir(), "dest"), originSrc)
+	if err != nil {
+		t.Fatalf("resume sync failed: %v", err)
+	}
+	if metrics.PeerChunks < 1 {
+		t.Fatalf("expected peer chunks, got %+v", metrics)
+	}
+	if !leecherCache.HasChunk(hashes[0]) || !leecherCache.HasChunk(hashes[1]) {
+		t.Fatal("expected all chunks after resume sync")
+	}
+}
+
+func TestSortByAssignedPrefersLessLoadedPeer(t *testing.T) {
+	var assigned sync.Map
+	aCtr, bCtr := new(int64), new(int64)
+	assigned.Store("a", aCtr)
+	assigned.Store("b", bCtr)
+	atomic.StoreInt64(aCtr, 3)
+	atomic.StoreInt64(bCtr, 1)
+
+	peers := []*proto.PeerInfo{
+		{NodeId: "heavy", Address: "a"},
+		{NodeId: "light", Address: "b"},
+	}
+	sortByAssigned(peers, &assigned)
+	if peers[0].NodeId != "light" {
+		t.Fatalf("expected lighter peer first, got %s", peers[0].NodeId)
+	}
+}
+
+type reportSpy struct {
+	onReport func([]string)
+}
+
+func (r *reportSpy) ReportChunks(_ context.Context, req *proto.ReportChunksRequest, _ ...grpc.CallOption) (*proto.ReportChunksResponse, error) {
+	if r.onReport != nil {
+		r.onReport(req.GetChunkHashes())
+	}
+	return &proto.ReportChunksResponse{ChunksRecorded: int64(len(req.GetChunkHashes()))}, nil
+}

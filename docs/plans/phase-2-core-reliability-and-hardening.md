@@ -147,3 +147,5 @@ Chunk index: `hash → size, last_access, refcount`. Pin holds refs for an artif
 - [x] Swarm scheduler + cancelable engine jobs; sync prints reused/peer/origin/saved
 - [x] Refcounted LRU, pin/unpin, `spiderd` pin reconcile
 - [x] Path sanitization, drain, Prometheus/Grafana, persistence/eviction/blacklist tests
+- [x] Immediate chunk advertisement, live peer discovery, upload backpressure, streaming/resumable chunk ingest
+- [x] Bring-your-own Postgres/Redis/`none` via YAML, flags, and `SPIDER_*` env

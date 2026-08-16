@@ -31,8 +31,8 @@ import (
 type daemonSyncHandler struct {
 	nodeID string
 	eng    *engine.Engine
-	cache  *cache.Cache
-	mgr    *cache.Manager
+	cache  *cache.ChunkStore
+	mgr    *cache.QuotaManager
 	s3     source.S3Config
 	runCtx context.Context
 }
@@ -149,21 +149,21 @@ func main() {
 		cfg.HTTPAddr = cfg.Node.HTTPAddr
 	}
 	if *cacheDir != "" {
-		cfg.DiskCache.Dir = *cacheDir
+		cfg.ChunkCache.Dir = *cacheDir
 	}
 	logging.SetDefault(cfg.LogFormat)
 
-	c, err := cache.NewCache(cfg.DiskCache.Dir)
+	c, err := cache.NewChunkStore(cfg.ChunkCache.Dir)
 	if err != nil {
-		slog.Error("cache init", "err", err)
+		slog.Error("chunk store init", "err", err)
 		os.Exit(1)
 	}
-	mgr, err := cache.NewManager(c, cfg.DiskCache.MaxBytes, cfg.DiskCache.LowWatermark, cfg.DiskCache.HighWatermark)
+	mgr, err := cache.NewQuotaManager(c, cfg.ChunkCache.MaxBytes, cfg.ChunkCache.LowWatermark, cfg.ChunkCache.HighWatermark)
 	if err != nil {
-		slog.Error("cache manager", "err", err)
+		slog.Error("chunk quota manager", "err", err)
 		os.Exit(1)
 	}
-	for _, id := range cfg.DiskCache.PinnedArtifacts {
+	for _, id := range cfg.ChunkCache.PinnedArtifacts {
 		if mf, err := c.GetManifest(id); err == nil {
 			_ = mgr.Pin(mf)
 			slog.Info("reconciled pin", "artifact", id)
@@ -193,13 +193,17 @@ func main() {
 
 	clientPool := peer.NewClientPool()
 	eng := engine.NewEngine(engine.Config{
-		NodeID:        *nodeID,
-		Locality:      loc,
-		Cache:         c,
-		TrackerClient: trackerClient,
-		ClientPool:    clientPool,
-		Materializer:  materializer.NewMaterializer(materializer.DefaultOptions()),
-		Scheduler:     scheduler.New(8),
+		NodeID:             *nodeID,
+		Locality:           loc,
+		Cache:              c,
+		TrackerClient:      trackerClient,
+		ClientPool:         clientPool,
+		Materializer:       materializer.NewMaterializer(materializer.DefaultOptions()),
+		Scheduler:          scheduler.New(cfg.Download.MaxConcurrency),
+		MaxPeerConcurrency: cfg.Download.MaxConcurrency,
+		Advertisement:      cfg.Advertisement,
+		PeerDiscovery:      cfg.PeerDiscovery,
+		Retry:              cfg.Retry,
 	})
 
 	s3Cfg := source.S3Config{
@@ -207,9 +211,25 @@ func main() {
 		AccessKey: *s3AccessKey, SecretKey: *s3SecretKey, UsePathStyle: true,
 	}
 	handler := &daemonSyncHandler{nodeID: *nodeID, eng: eng, cache: c, mgr: mgr, s3: s3Cfg, runCtx: runCtx}
-	peerServer := peer.NewServer(*nodeID, c, handler)
+	peerServer := peer.NewServerWithLimits(*nodeID, c, handler, peer.UploadLimits{
+		MaxConcurrency:   cfg.Upload.MaxConcurrency,
+		MaxQueueSize:     cfg.Upload.MaxQueueSize,
+		MaxBandwidthMbps: cfg.Upload.MaxBandwidthMbps,
+	})
 
-	httpSrv := httpserver.Start(cfg.HTTPAddr, func(context.Context) error { return nil })
+	httpSrv := httpserver.Start(cfg.HTTPAddr, func(ctx context.Context) error {
+		dir := cfg.ChunkCache.Dir
+		if err := os.MkdirAll(dir, 0755); err != nil {
+			return err
+		}
+		f, err := os.CreateTemp(dir, ".ready-*")
+		if err != nil {
+			return err
+		}
+		name := f.Name()
+		_ = f.Close()
+		return os.Remove(name)
+	})
 
 	if trackerClient != nil {
 		go func() {
@@ -262,7 +282,7 @@ func main() {
 		os.Exit(0)
 	}()
 
-	slog.Info("spiderd listening", "node", *nodeID, "port", *port, "cache", cfg.DiskCache.Dir)
+	slog.Info("spiderd listening", "node", *nodeID, "port", *port, "chunkCache", cfg.ChunkCache.Dir)
 	if err := peerServer.Start(*port); err != nil {
 		slog.Error("peer server", "err", err)
 		os.Exit(1)

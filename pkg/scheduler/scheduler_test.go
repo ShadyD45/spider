@@ -78,3 +78,17 @@ func TestInflightCap(t *testing.T) {
 		t.Fatal("after end")
 	}
 }
+
+func TestRankPeersPrefersLowerInflight(t *testing.T) {
+	s := New(8)
+	busy := "10.0.0.1:1"
+	idle := "10.0.0.2:1"
+	s.Begin(busy)
+	ranked := s.RankPeers(topology.Locality{Rack: "r1"}, []*proto.PeerInfo{
+		{NodeId: "busy", Address: busy, Rack: "r1"},
+		{NodeId: "idle", Address: idle, Rack: "r1"},
+	})
+	if ranked[0].NodeId != "idle" {
+		t.Fatalf("expected idle first, got %s", ranked[0].NodeId)
+	}
+}

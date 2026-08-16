@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"testing"
+	"time"
 
 	"google.golang.org/grpc"
 	"spider/api/v1/proto"
@@ -97,5 +98,104 @@ func TestDownloadChunkRejectsHashMismatch(t *testing.T) {
 	_, err = pool.DownloadChunk(context.Background(), fmt.Sprintf("127.0.0.1:%d", lis.Addr().(*net.TCPAddr).Port), expected)
 	if err == nil {
 		t.Fatal("expected hash mismatch error from corrupt peer stream")
+	}
+}
+
+func TestUploadBackpressure(t *testing.T) {
+	tempDir := t.TempDir()
+	c, err := cache.NewChunkStore(tempDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	chunkData := bytes.Repeat([]byte("ab"), 4096)
+	chunkHash := chunk.ComputeHash(chunkData)
+	if err := c.PutChunk(chunkHash, chunkData); err != nil {
+		t.Fatal(err)
+	}
+
+	lis, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	grpcServer := grpc.NewServer()
+	hold := make(chan struct{})
+	started := make(chan struct{})
+	srv := NewServerWithLimits("node-1", c, nil, UploadLimits{
+		MaxConcurrency: 1,
+		MaxQueueSize:   0,
+		AfterAcquire: func() {
+			select {
+			case <-started:
+			default:
+				close(started)
+			}
+			<-hold
+		},
+	})
+	proto.RegisterPeerServiceServer(grpcServer, srv)
+	go func() { _ = grpcServer.Serve(lis) }()
+	defer grpcServer.Stop()
+
+	addr := fmt.Sprintf("127.0.0.1:%d", lis.Addr().(*net.TCPAddr).Port)
+	pool := NewClientPool()
+	defer pool.Close()
+
+	go func() {
+		_, _ = pool.DownloadChunk(context.Background(), addr, chunkHash)
+	}()
+	select {
+	case <-started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("first upload did not start")
+	}
+	_, err = pool.DownloadChunk(context.Background(), addr, chunkHash)
+	if err == nil {
+		t.Fatal("expected resource exhausted on second upload")
+	}
+	close(hold)
+}
+
+func TestDownloadResumeFromOffset(t *testing.T) {
+	tempDir := t.TempDir()
+	c, err := cache.NewChunkStore(tempDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	chunkData := bytes.Repeat([]byte("0123456789ABCDEF"), 256)
+	chunkHash := chunk.ComputeHash(chunkData)
+	if err := c.PutChunk(chunkHash, chunkData); err != nil {
+		t.Fatal(err)
+	}
+	lis, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	grpcServer := grpc.NewServer()
+	proto.RegisterPeerServiceServer(grpcServer, NewServer("n", c, nil))
+	go func() { _ = grpcServer.Serve(lis) }()
+	defer grpcServer.Stop()
+
+	dest, err := cache.NewChunkStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := dest.AppendPartial(chunkHash, bytes.NewReader(chunkData[:100])); err != nil {
+		t.Fatal(err)
+	}
+	pool := NewClientPool()
+	defer pool.Close()
+	addr := fmt.Sprintf("127.0.0.1:%d", lis.Addr().(*net.TCPAddr).Port)
+	var buf bytes.Buffer
+	if _, err := pool.DownloadChunkTo(context.Background(), addr, chunkHash, 100, &buf); err != nil {
+		t.Fatal(err)
+	}
+	if err := dest.AppendPartial(chunkHash, &buf); err != nil {
+		t.Fatal(err)
+	}
+	if err := dest.CommitPartial(chunkHash); err != nil {
+		t.Fatal(err)
+	}
+	if !dest.HasChunk(chunkHash) {
+		t.Fatal("resumed chunk missing")
 	}
 }

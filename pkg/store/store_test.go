@@ -2,6 +2,8 @@ package store
 
 import (
 	"context"
+	"fmt"
+	"os"
 	"testing"
 	"time"
 
@@ -81,4 +83,29 @@ func TestSQLitePersistence(t *testing.T) {
 	if err != nil || len(ids) != 1 {
 		t.Fatalf("chunks %v %v", ids, err)
 	}
+}
+
+func TestPostgresStoreOptional(t *testing.T) {
+	dsn := os.Getenv("SPIDER_TEST_POSTGRES_DSN")
+	if dsn == "" {
+		t.Skip("set SPIDER_TEST_POSTGRES_DSN to run postgres store tests")
+	}
+	ctx := context.Background()
+	st, err := Open("postgres", Options{DSN: dsn})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	if err := st.Ping(ctx); err != nil {
+		t.Fatal(err)
+	}
+	id := fmt.Sprintf("pg-test-%d", time.Now().UnixNano())
+	if err := st.UpsertPeer(ctx, Peer{NodeID: id, Address: "a:1", LastHeartbeat: time.Now(), Status: "HEALTHY"}); err != nil {
+		t.Fatal(err)
+	}
+	p, err := st.GetPeer(ctx, id)
+	if err != nil || p == nil {
+		t.Fatalf("postgres peer: %v %+v", err, p)
+	}
+	_ = st.DeregisterPeer(ctx, id)
 }
