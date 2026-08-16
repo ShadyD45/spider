@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 
 	v1 "spider/api/v1"
 	"spider/pkg/chunk"
@@ -30,6 +31,8 @@ type ChunkStore struct {
 	tmpDir     string
 	partialDir string
 	mfstDir    string
+	hashMu     sync.Map // hash -> *sync.Mutex
+	onCommit   func(hash string, size int64)
 }
 
 // Cache is a compatibility alias for ChunkStore.
@@ -56,6 +59,19 @@ func NewChunkStore(rootDir string) (*ChunkStore, error) {
 	}
 
 	return c, nil
+}
+
+// SetOnCommit registers a hook invoked after a successful CommitPartial.
+func (c *ChunkStore) SetOnCommit(fn func(hash string, size int64)) {
+	c.onCommit = fn
+}
+
+// LockHash serializes partial-file operations for a single chunk hash.
+func (c *ChunkStore) LockHash(hash string) func() {
+	v, _ := c.hashMu.LoadOrStore(hash, &sync.Mutex{})
+	mu := v.(*sync.Mutex)
+	mu.Lock()
+	return mu.Unlock
 }
 
 // NewCache is a compatibility alias for NewChunkStore.
@@ -200,6 +216,8 @@ func (c *ChunkStore) PutChunk(hash string, data []byte) error {
 
 // PutChunkFromReader replaces any partial, streams to a hash-named file, verifies, and commits.
 func (c *ChunkStore) PutChunkFromReader(hash string, r io.Reader) error {
+	unlock := c.LockHash(hash)
+	defer unlock()
 	if err := c.DiscardPartial(hash); err != nil {
 		return err
 	}
@@ -269,6 +287,13 @@ func (c *ChunkStore) CommitPartial(hash string) error {
 	}
 	if err := os.Rename(p, destPath); err != nil {
 		return fmt.Errorf("failed to move chunk to cache: %w", err)
+	}
+	if c.onCommit != nil {
+		size := int64(0)
+		if st, err := os.Stat(destPath); err == nil {
+			size = st.Size()
+		}
+		c.onCommit(hash, size)
 	}
 	return nil
 }

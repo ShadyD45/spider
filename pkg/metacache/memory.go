@@ -14,7 +14,7 @@ type memEntry struct {
 
 // Memory is a process-local LRU-ish map with TTL (no strict LRU cap; bounded by key set).
 type Memory struct {
-	mu      sync.RWMutex
+	mu         sync.RWMutex
 	items      map[string]memEntry
 	defaultTTL time.Duration
 }
@@ -71,6 +71,29 @@ func (m *Memory) Set(_ context.Context, key string, value []byte, ttl time.Durat
 	m.mu.Lock()
 	m.items[key] = memEntry{value: cp, expiresAt: time.Now().Add(ttl)}
 	m.mu.Unlock()
+	return nil
+}
+
+func (m *Memory) MGet(ctx context.Context, keys []string) (map[string][]byte, error) {
+	out := make(map[string][]byte, len(keys))
+	for _, k := range keys {
+		v, ok, err := m.Get(ctx, k)
+		if err != nil {
+			return nil, err
+		}
+		if ok {
+			out[k] = v
+		}
+	}
+	return out, nil
+}
+
+func (m *Memory) MSet(ctx context.Context, items map[string][]byte, ttl time.Duration) error {
+	for k, v := range items {
+		if err := m.Set(ctx, k, v, ttl); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 

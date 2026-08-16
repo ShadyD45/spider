@@ -11,6 +11,8 @@ import (
 type Cache interface {
 	Get(ctx context.Context, key string) ([]byte, bool, error)
 	Set(ctx context.Context, key string, value []byte, ttl time.Duration) error
+	MGet(ctx context.Context, keys []string) (map[string][]byte, error)
+	MSet(ctx context.Context, items map[string][]byte, ttl time.Duration) error
 	Delete(ctx context.Context, key string) error
 	DeletePrefix(ctx context.Context, prefix string) error
 	Close() error
@@ -19,8 +21,8 @@ type Cache interface {
 type opener func(opts Options) (Cache, error)
 
 var (
-	mu       sync.RWMutex
-	openers  = map[string]opener{}
+	mu      sync.RWMutex
+	openers = map[string]opener{}
 )
 
 // Options configure a cache driver. New backends must honor Pool

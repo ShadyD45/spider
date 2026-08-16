@@ -10,6 +10,7 @@ import (
 	"google.golang.org/grpc"
 	"spider/api/v1/proto"
 	"spider/pkg/metrics"
+	"spider/pkg/netutil"
 	"spider/pkg/store"
 )
 
@@ -96,6 +97,9 @@ func (s *Server) Start(port int) error {
 	lis, err := net.Listen("tcp", fmt.Sprintf(":%d", port))
 	if err != nil {
 		return fmt.Errorf("failed to listen on port %d: %w", port, err)
+	}
+	if !netutil.IsLoopbackListen(lis.Addr().String()) {
+		slog.Warn("tracker gRPC is listening without TLS; anything that can reach this port has full mesh access", "addr", lis.Addr().String())
 	}
 	s.server = grpc.NewServer()
 	proto.RegisterTrackerServiceServer(s.server, s)

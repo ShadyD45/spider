@@ -3,7 +3,7 @@
 Latest numbers from `scripts/run-benchmarks.ps1` / `scripts/run-benchmarks.sh`. Re-run those scripts to refresh this file.
 
 **Host:** Windows amd64, 11th Gen Intel Core i5-11320H @ 3.20 GHz  
-**Date:** 2026-08-16 (micro, in-process loopback, and compose fleet — Phase 2.5 build)
+**Date:** 2026-08-16 (micro, in-process loopback, and compose fleet — after code-review fixes)
 
 ---
 
@@ -46,18 +46,22 @@ goarch: amd64
 cpu: 11th Gen Intel(R) Core(TM) i5-11320H @ 3.20GHz
 
 pkg: spider/pkg/chunk
-BenchmarkChunker4MiB-8             	      27	  55746789 ns/op	 300.95 MB/s	20972804 B/op	      21 allocs/op
-BenchmarkSHA256HashCalculation-8   	     100	  11228206 ns/op	 373.55 MB/s	     208 B/op	       3 allocs/op
+BenchmarkChunker4MiB-8             	      61	  23777433 ns/op	 705.59 MB/s	20972888 B/op	      21 allocs/op
+BenchmarkSHA256HashCalculation-8   	     391	   3261080 ns/op	1286.17 MB/s	     208 B/op	       3 allocs/op
 
 pkg: spider/pkg/cache
-BenchmarkCacheAtomicPut4MiB-8   	      24	 166526675 ns/op	  25.19 MB/s	   37335 B/op	      31 allocs/op
+BenchmarkCacheAtomicPut4MiB-8   	      55	  21258627 ns/op	 197.30 MB/s	   37331 B/op	      34 allocs/op
+
+pkg: spider/pkg/tracker
+BenchmarkLocateChunks25k-8   	      66	  23218877 ns/op	 9375006 B/op	  125103 allocs/op
 ```
 
 | Primitive | ns/op | Throughput | Allocs |
 |---|---|---|---|
-| SHA-256 (4 MiB) | 11.2 ms | 374 MB/s | 3 |
-| Fixed 4 MiB chunker (16 MiB stream) | 55.7 ms | 301 MB/s | 21 |
-| Atomic cache Put + on-disk re-hash | 166.5 ms | 25 MB/s | 31 |
+| SHA-256 (4 MiB) | 3.26 ms | 1286 MB/s | 3 |
+| Fixed 4 MiB chunker (16 MiB stream) | 23.8 ms | 706 MB/s | 21 |
+| Atomic cache Put + on-disk re-hash | 21.3 ms | 197 MB/s | 34 |
+| Tracker LocateChunks (25k hashes, memory store) | 23.2 ms | — | 125103 |
 
 ---
 
@@ -69,10 +73,10 @@ Same-host loopback; no compose/Grafana. Useful for quick engine regression check
 
 | Metric | Direct origin | Spider P2P | Improvement |
 |---|---|---|---|
-| Duration | 12.0s | 29.7s | 0.40× wall clock |
-| Origin data | 3000 MB | 0 MB | **100% origin saved** |
-| Peer data | 0 | 3000 MB | offloaded to mesh |
-| Fleet throughput | 251 MB/s | 101 MB/s | — |
+| Duration | 11.0s | 29.6s | 0.37× wall clock |
+| Origin data | 3000 MB | 456 MB | **84.8% origin saved** |
+| Peer data | 0 | 2544 MB | offloaded to mesh |
+| Fleet throughput | 273 MB/s | 101 MB/s | — |
 
 ### Compose stack (`run-compose-benchmark`) — 500 MB × 3 workers
 
@@ -80,14 +84,14 @@ Real `spiderd` nodes, central tracker (Redis + SQLite), Prometheus scrape.
 
 | Metric | Direct origin | Spider P2P | Improvement |
 |---|---|---|---|
-| Duration | 33.8s | 31.5s | **1.07× wall clock** |
-| Origin data | 856 MB | 0 MB | **100% origin saved** |
-| Peer data | 0 | 1000 MB | offloaded to mesh |
-| Fleet throughput | 44.4 MB/s | 47.6 MB/s | — |
+| Duration | 31.6s | 13.9s | **2.27× wall clock** |
+| Origin data | 692 MB | 0 MB | **100% origin saved** |
+| Peer data | 0 | 64 MB | offloaded to mesh |
+| Fleet throughput | 47.5 MB/s | 108 MB/s | — |
 
-Prometheus delta (full run): `origin_downloaded=0`, `peer_transferred=1048576000`.
+Prometheus delta (this run): `origin_downloaded=0`, `peer_transferred=67108864` (64 MiB).
 
-Baseline origin bytes (856 MB vs theoretical 1500 MB) reflect sync-log totals after worker cache resets; some workers may report partial reuse across scenario setup. Mesh scenario still shows **zero** origin bytes on workers 2–3.
+Baseline origin bytes (692 MB vs theoretical 1500 MB) reflect sync-log totals after worker cache resets; some workers may report partial reuse across scenario setup. Mesh still shows **zero** origin bytes. Reported peer bytes are lower than 2×500 MB theoretical — treat Prometheus/script totals as the recorded figure, not a full 1.5 GB fan-out accounting.
 
 ---
 
@@ -121,8 +125,8 @@ Swarm amplification (`rate(peer_bytes) / rate(origin_bytes)`) measures distribut
 
 | Benchmark | Workers | Origin (baseline) | Origin (P2P) | Peer (P2P) | Wall clock (baseline → P2P) |
 |---|---|---|---|---|---|
-| In-process loopback | 6 × 500 MB | 3000 MB | 0 MB (**100% saved**) | 3000 MB | 12.0s → 29.7s (**0.40×**) |
-| Compose fleet | 3 × 500 MB | 856 MB | 0 MB (**100% saved**) | 1000 MB | 33.8s → 31.5s (**1.07×**) |
+| In-process loopback | 6 × 500 MB | 3000 MB | 456 MB (**84.8% saved**) | 2544 MB | 11.0s → 29.6s (**0.37×**) |
+| Compose fleet | 3 × 500 MB | 692 MB | 0 MB (**100% saved**) | 64 MB | 31.6s → 13.9s (**2.27×**) |
 
 Compose mesh: worker-1 seeds; workers 2–3 pull 500 MB each from worker-1; worker-1 reuses local cache. No worker reads `/bench/origin` during mesh sync.
 
@@ -158,7 +162,7 @@ These runs are **misleading for wall-clock speedup** if taken out of context:
 - [ ] **Multi-machine fleet** — Separate seed host, multiple worker hosts, remote object-store origin (different AZ/region).
 - [ ] **Rate-limited origin** — Throttle S3/MinIO to simulate production egress caps.
 - [ ] **Larger artifacts & more workers** — e.g. 10+ nodes, multi-GB models.
-- [ ] **Document refreshed results** in this file after each multi-host run. *(Same-host compose + loopback refreshed 2026-08-16.)*
+- [ ] **Document refreshed results** in this file after each multi-host run. *(Same-host compose + loopback refreshed 2026-08-16 after code-review fixes.)*
 
 ---
 
@@ -166,7 +170,7 @@ These runs are **misleading for wall-clock speedup** if taken out of context:
 
 ```powershell
 # Microbenchmarks only
-go test -count=1 -bench="." -benchmem ./pkg/chunk ./pkg/cache
+go test -count=1 -bench="." -benchmem ./pkg/chunk ./pkg/cache ./pkg/tracker
 
 # In-process loopback (no Grafana)
 go build -o bin/spiderctl.exe ./cmd/spiderctl

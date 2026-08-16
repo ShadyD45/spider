@@ -117,14 +117,34 @@ func (r *Registry) LocateChunks(ctx context.Context, requesterNodeID string, chu
 
 	requesterLoc := r.requesterLoc(ctx, requesterNodeID)
 	now := time.Now()
+	located, err := r.store.LocateChunkNodesBatch(ctx, chunkHashes)
+	if err != nil {
+		var locations []*proto.ChunkLocation
+		for _, h := range chunkHashes {
+			locations = append(locations, &proto.ChunkLocation{ChunkHash: h})
+		}
+		return locations
+	}
+	idSet := make(map[string]struct{})
+	for _, ids := range located {
+		for _, id := range ids {
+			if id == requesterNodeID {
+				continue
+			}
+			idSet[id] = struct{}{}
+		}
+	}
+	uniq := make([]string, 0, len(idSet))
+	for id := range idSet {
+		uniq = append(uniq, id)
+	}
+	peersByID, err := r.store.GetPeersBatch(ctx, uniq)
+	if err != nil {
+		peersByID = map[string]*store.Peer{}
+	}
 	var locations []*proto.ChunkLocation
 	for _, h := range chunkHashes {
-		ids, err := r.store.LocateChunkNodes(ctx, h)
-		if err != nil {
-			locations = append(locations, &proto.ChunkLocation{ChunkHash: h})
-			continue
-		}
-		peers := r.peersForIDs(ctx, ids, requesterNodeID, now)
+		peers := r.peersFromCache(located[h], requesterNodeID, now, peersByID)
 		topology.SortPeersByProximity(requesterLoc, peers)
 		locations = append(locations, &proto.ChunkLocation{ChunkHash: h, Peers: peers})
 	}
@@ -152,13 +172,21 @@ func (r *Registry) requesterLoc(ctx context.Context, nodeID string) topology.Loc
 }
 
 func (r *Registry) peersForIDs(ctx context.Context, ids []string, skip string, now time.Time) []*proto.PeerInfo {
+	peers, err := r.store.GetPeersBatch(ctx, ids)
+	if err != nil {
+		return nil
+	}
+	return r.peersFromCache(ids, skip, now, peers)
+}
+
+func (r *Registry) peersFromCache(ids []string, skip string, now time.Time, peers map[string]*store.Peer) []*proto.PeerInfo {
 	var out []*proto.PeerInfo
 	for _, id := range ids {
 		if id == skip {
 			continue
 		}
-		p, err := r.store.GetPeer(ctx, id)
-		if err != nil || p == nil {
+		p := peers[id]
+		if p == nil {
 			continue
 		}
 		if now.Sub(p.LastHeartbeat) <= r.peerExpiry {

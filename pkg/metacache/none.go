@@ -8,8 +8,12 @@ import (
 // Nop implements Cache with no storage (every Get misses).
 type Nop struct{}
 
-func (Nop) Get(context.Context, string) ([]byte, bool, error)          { return nil, false, nil }
-func (Nop) Set(context.Context, string, []byte, time.Duration) error   { return nil }
-func (Nop) Delete(context.Context, string) error                       { return nil }
-func (Nop) DeletePrefix(context.Context, string) error                 { return nil }
-func (Nop) Close() error                                               { return nil }
+func (Nop) Get(context.Context, string) ([]byte, bool, error)        { return nil, false, nil }
+func (Nop) Set(context.Context, string, []byte, time.Duration) error { return nil }
+func (Nop) MGet(_ context.Context, keys []string) (map[string][]byte, error) {
+	return map[string][]byte{}, nil
+}
+func (Nop) MSet(context.Context, map[string][]byte, time.Duration) error { return nil }
+func (Nop) Delete(context.Context, string) error                         { return nil }
+func (Nop) DeletePrefix(context.Context, string) error                   { return nil }
+func (Nop) Close() error                                                 { return nil }

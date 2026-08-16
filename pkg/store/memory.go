@@ -16,11 +16,11 @@ type memSeed struct {
 
 // Memory is an in-process Store used for tests and demos.
 type Memory struct {
-	mu       sync.RWMutex
-	peers    map[string]Peer
-	arts     map[string]ArtifactRecord
-	seeds    map[string]*memSeed            // artifactID -> nodes
-	chunks   map[string]map[string]time.Time // hash -> nodeID -> t
+	mu     sync.RWMutex
+	peers  map[string]Peer
+	arts   map[string]ArtifactRecord
+	seeds  map[string]*memSeed             // artifactID -> nodes
+	chunks map[string]map[string]time.Time // hash -> nodeID -> t
 }
 
 func NewMemory() *Memory {
@@ -202,4 +202,31 @@ func (m *Memory) LocateChunkNodes(_ context.Context, hash string) ([]string, err
 		ids = append(ids, id)
 	}
 	return ids, nil
+}
+
+func (m *Memory) LocateChunkNodesBatch(_ context.Context, hashes []string) (map[string][]string, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	out := make(map[string][]string, len(hashes))
+	for _, h := range hashes {
+		var ids []string
+		for id := range m.chunks[h] {
+			ids = append(ids, id)
+		}
+		out[h] = ids
+	}
+	return out, nil
+}
+
+func (m *Memory) GetPeersBatch(_ context.Context, nodeIDs []string) (map[string]*Peer, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	out := make(map[string]*Peer, len(nodeIDs))
+	for _, id := range nodeIDs {
+		if p, ok := m.peers[id]; ok {
+			cp := p
+			out[id] = &cp
+		}
+	}
+	return out, nil
 }

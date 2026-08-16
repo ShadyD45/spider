@@ -76,3 +76,64 @@ func TestManifestValidationFailures(t *testing.T) {
 		t.Fatal("Expected error for empty name/files")
 	}
 }
+
+func TestValidateRejectsPathTraversal(t *testing.T) {
+	h := fakeHash("x")
+	m := &ArtifactManifest{
+		SchemaVersion: 1,
+		Name:          "bad",
+		Version:       "1",
+		ChunkSize:     1,
+		TotalSize:     1,
+		Files: []FileEntry{{
+			Path:   "a/../../outside.txt",
+			Size:   1,
+			Chunks: []ChunkRef{{Hash: h, Offset: 0, Size: 1}},
+		}},
+	}
+	id, err := m.ComputeID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.ArtifactID = id
+	if err := m.Validate(); err == nil {
+		t.Fatal("expected Validate to reject traversal path")
+	}
+}
+
+func TestValidateDoesNotReorderFiles(t *testing.T) {
+	h1 := fakeHash("1")
+	h2 := fakeHash("2")
+	m := &ArtifactManifest{
+		SchemaVersion: 1,
+		Name:          "order",
+		Version:       "1",
+		ChunkSize:     1,
+		TotalSize:     2,
+		Files: []FileEntry{
+			{Path: "z.bin", Size: 1, Chunks: []ChunkRef{{Hash: h1, Offset: 0, Size: 1}}},
+			{Path: "a.bin", Size: 1, Chunks: []ChunkRef{{Hash: h2, Offset: 0, Size: 1}}},
+		},
+	}
+	id, err := m.ComputeID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.ArtifactID = id
+	before := m.Files[0].Path
+	if err := m.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	if m.Files[0].Path != before || m.Files[0].Path != "z.bin" {
+		t.Fatalf("Validate must not reorder Files, got %q", m.Files[0].Path)
+	}
+	if err := m.Finalize(); err != nil {
+		t.Fatal(err)
+	}
+	if m.Files[0].Path != "a.bin" {
+		t.Fatalf("Finalize should sort files, got %q", m.Files[0].Path)
+	}
+}

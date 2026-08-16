@@ -5,9 +5,11 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"log/slog"
 	"net"
 	"strconv"
 	"sync/atomic"
+	"time"
 
 	"golang.org/x/time/rate"
 	"google.golang.org/grpc"
@@ -17,6 +19,7 @@ import (
 	"spider/api/v1/proto"
 	"spider/pkg/cache"
 	"spider/pkg/metrics"
+	"spider/pkg/netutil"
 )
 
 const (
@@ -40,15 +43,17 @@ type UploadLimits struct {
 // Server implements proto.PeerServiceServer.
 type Server struct {
 	proto.UnimplementedPeerServiceServer
-	nodeID       string
-	cache        *cache.ChunkStore
-	syncHandler  SyncHandler
-	grpcServer   *grpc.Server
-	slots        chan struct{}
-	queued       atomic.Int64
-	maxQueue     int
-	limiter      *rate.Limiter
-	afterAcquire func()
+	nodeID        string
+	cache         *cache.ChunkStore
+	syncHandler   SyncHandler
+	grpcServer    *grpc.Server
+	slots         chan struct{}
+	queued        atomic.Int64
+	maxQueue      int
+	limiter       *rate.Limiter
+	bytesPerSec   float64
+	activeStreams atomic.Int64
+	afterAcquire  func()
 }
 
 // NewServer creates a peer chunk streaming server with default upload limits.
@@ -73,6 +78,7 @@ func NewServerWithLimits(nodeID string, c *cache.ChunkStore, syncHandler SyncHan
 	}
 	if lim.MaxBandwidthMbps > 0 {
 		bytesPerSec := float64(lim.MaxBandwidthMbps) * 1024 * 1024 / 8
+		s.bytesPerSec = bytesPerSec
 		s.limiter = rate.NewLimiter(rate.Limit(bytesPerSec), StreamSliceSize)
 	}
 	metrics.UploadBandwidthLimitMbps.Set(float64(lim.MaxBandwidthMbps))
@@ -118,7 +124,30 @@ func (s *Server) releaseUpload() {
 }
 
 func (s *Server) waitBandwidth(ctx context.Context, n int) error {
-	if s.limiter == nil || n <= 0 {
+	if n <= 0 {
+		return nil
+	}
+	if s.bytesPerSec > 0 {
+		active := s.activeStreams.Load()
+		if active < 1 {
+			active = 1
+		}
+		share := s.bytesPerSec / float64(active)
+		if share > 0 {
+			delay := time.Duration(float64(n) / share * float64(time.Second))
+			if delay > 0 {
+				t := time.NewTimer(delay)
+				select {
+				case <-ctx.Done():
+					t.Stop()
+					return ctx.Err()
+				case <-t.C:
+				}
+			}
+		}
+		return nil
+	}
+	if s.limiter == nil {
 		return nil
 	}
 	return s.limiter.WaitN(ctx, n)
@@ -130,6 +159,8 @@ func (s *Server) GetChunk(req *proto.GetChunkRequest, stream proto.PeerService_G
 		return err
 	}
 	defer s.releaseUpload()
+	s.activeStreams.Add(1)
+	defer s.activeStreams.Add(-1)
 	if s.afterAcquire != nil {
 		s.afterAcquire()
 	}
@@ -251,6 +282,9 @@ func (s *Server) Start(port int) error {
 	lis, err := net.Listen("tcp", fmt.Sprintf(":%d", port))
 	if err != nil {
 		return fmt.Errorf("failed to listen on port %d: %w", port, err)
+	}
+	if !netutil.IsLoopbackListen(lis.Addr().String()) {
+		slog.Warn("peer gRPC is listening without TLS; anything that can reach this port has full mesh access", "addr", lis.Addr().String())
 	}
 
 	s.grpcServer = grpc.NewServer()

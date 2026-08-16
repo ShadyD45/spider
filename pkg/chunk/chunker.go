@@ -59,35 +59,47 @@ func NewChunker(chunkSize int64) *Chunker {
 	return &Chunker{chunkSize: chunkSize}
 }
 
-// ChunkReader reads from an io.Reader and streams Chunk slices.
-func (c *Chunker) ChunkReader(r io.Reader) ([]Chunk, error) {
-	var chunks []Chunk
-	var offset int64
+// ChunkStream reads r one chunk at a time and invokes onChunk. The callback must
+// copy or persist ch.Data before returning if it needs the payload later.
+func (c *Chunker) ChunkStream(r io.Reader, onChunk func(Chunk) error) error {
+	if onChunk == nil {
+		return fmt.Errorf("onChunk callback is required")
+	}
 	buf := make([]byte, c.chunkSize)
-
+	var offset int64
 	for {
 		n, err := io.ReadFull(r, buf)
 		if n > 0 {
 			chunkBytes := make([]byte, n)
 			copy(chunkBytes, buf[:n])
-			h := ComputeHash(chunkBytes)
-			chunks = append(chunks, Chunk{
-				Hash:   h,
+			ch := Chunk{
+				Hash:   ComputeHash(chunkBytes),
 				Data:   chunkBytes,
 				Offset: offset,
 				Size:   int64(n),
-			})
+			}
+			if cbErr := onChunk(ch); cbErr != nil {
+				return cbErr
+			}
 			offset += int64(n)
 		}
 		if err == io.EOF || err == io.ErrUnexpectedEOF {
-			break
+			return nil
 		}
 		if err != nil {
-			return nil, fmt.Errorf("error reading chunk at offset %d: %w", offset, err)
+			return fmt.Errorf("error reading chunk at offset %d: %w", offset, err)
 		}
 	}
+}
 
-	return chunks, nil
+// ChunkReader reads from an io.Reader and returns all chunks (including payloads).
+func (c *Chunker) ChunkReader(r io.Reader) ([]Chunk, error) {
+	var chunks []Chunk
+	err := c.ChunkStream(r, func(ch Chunk) error {
+		chunks = append(chunks, ch)
+		return nil
+	})
+	return chunks, err
 }
 
 // ChunkFile reads a file from disk and returns its chunk references and chunk list.
@@ -98,19 +110,15 @@ func (c *Chunker) ChunkFile(filePath string) ([]Chunk, []v1.ChunkRef, error) {
 	}
 	defer f.Close()
 
-	chunks, err := c.ChunkReader(f)
+	var chunks []Chunk
+	var refs []v1.ChunkRef
+	err = c.ChunkStream(f, func(ch Chunk) error {
+		chunks = append(chunks, ch)
+		refs = append(refs, v1.ChunkRef{Hash: ch.Hash, Offset: ch.Offset, Size: ch.Size})
+		return nil
+	})
 	if err != nil {
 		return nil, nil, err
 	}
-
-	refs := make([]v1.ChunkRef, len(chunks))
-	for i, ch := range chunks {
-		refs[i] = v1.ChunkRef{
-			Hash:   ch.Hash,
-			Offset: ch.Offset,
-			Size:   ch.Size,
-		}
-	}
-
 	return chunks, refs, nil
 }

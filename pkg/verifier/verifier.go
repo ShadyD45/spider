@@ -5,12 +5,12 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"path/filepath"
 	"strconv"
 
 	v1 "spider/api/v1"
 	"spider/pkg/cache"
 	"spider/pkg/chunk"
+	"spider/pkg/materializer"
 )
 
 // FileVerificationResult details verification for an individual file.
@@ -106,7 +106,14 @@ func VerifyMaterializedDirectory(ctx context.Context, manifest *v1.ArtifactManif
 			TotalChunks:  len(fileEntry.Chunks),
 		}
 
-		filePath := filepath.Join(targetDir, filepath.FromSlash(fileEntry.Path))
+		filePath, joinErr := materializer.SafeJoin(targetDir, fileEntry.Path)
+		if joinErr != nil {
+			res.Error = joinErr.Error()
+			report.CorruptFiles++
+			report.AllValid = false
+			report.FileResults = append(report.FileResults, res)
+			continue
+		}
 		info, err := os.Stat(filePath)
 		if err != nil {
 			if os.IsNotExist(err) {

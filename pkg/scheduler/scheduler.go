@@ -169,20 +169,29 @@ func RarestFirst(hashes []string, locations map[string][]*proto.PeerInfo) []stri
 		h string
 		n int
 	}
-	items := make([]item, 0, len(hashes))
+	var withPeers, without []item
 	for _, h := range hashes {
-		items = append(items, item{h: h, n: len(locations[h])})
+		n := len(locations[h])
+		it := item{h: h, n: n}
+		if n == 0 {
+			without = append(without, it)
+			continue
+		}
+		withPeers = append(withPeers, it)
 	}
-	for i := 1; i < len(items); i++ {
+	for i := 1; i < len(withPeers); i++ {
 		j := i
-		for j > 0 && items[j].n < items[j-1].n {
-			items[j], items[j-1] = items[j-1], items[j]
+		for j > 0 && withPeers[j].n < withPeers[j-1].n {
+			withPeers[j], withPeers[j-1] = withPeers[j-1], withPeers[j]
 			j--
 		}
 	}
-	out := make([]string, len(items))
-	for i, it := range items {
-		out[i] = it.h
+	out := make([]string, 0, len(hashes))
+	for _, it := range withPeers {
+		out = append(out, it.h)
+	}
+	for _, it := range without {
+		out = append(out, it.h)
 	}
 	return out
 }
