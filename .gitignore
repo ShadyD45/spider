@@ -30,6 +30,7 @@ go.work.sum
 # Benchmark transfer payload and run scratch
 /tmp/
 dist/
+/bin/
 
 # Editor/IDE
 # .idea/
